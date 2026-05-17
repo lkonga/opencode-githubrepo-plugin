@@ -103,11 +103,12 @@ function showDialog(api: any): void {
         api.ui.dialog.replace(() =>
           api.ui.DialogPrompt({
             title: `Set ${opt.title.split(":")[0]}`,
-            value: opt.title.match(/: (.+)s?$/)?.[1] || "",
+            value: (opt.title.match(/: (.+)s?$/)?.[1] || "").replace(/s$/i, ""),
             placeholder: isNumeric ? "Enter a positive integer" : "Enter new value",
             onConfirm: (value: string) => {
               if (!value) return
-              if (isNumeric && (!/^\d+$/.test(value) || Number(value) < 1)) {
+              const clean = isNumeric ? value.replace(/\D/g, "") : value
+              if (isNumeric && (!clean || Number(clean) < 1)) {
                 api.ui.toast({ variant: "error", message: `Must be a positive integer` })
                 return
               }
@@ -124,7 +125,7 @@ function showDialog(api: any): void {
                         : opt.value === "pollAttempts"
                           ? "pollAttempts"
                           : undefined
-              if (key) newConfig[key] = value
+              if (key) newConfig[key] = clean
               writeConfig(newConfig)
               showDialog(api)
               api.ui.toast({ variant: "info", message: `GitHubrepo: ${opt.title.split(":")[0]} set to ${value}` })
