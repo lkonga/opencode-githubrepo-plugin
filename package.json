@@ -1,0 +1,11 @@
+{
+  "name": "opencode-githubrepo",
+  "version": "1.0.0",
+  "description": "OpenCode plugin: semantic code search across GitHub repositories using Copilot embeddings",
+  "type": "module",
+  "main": "./index.ts",
+  "dependencies": {
+    "@opencode-ai/plugin": "npm:@opencode-ai/plugin@*",
+    "zod": "^4.3.6"
+  }
+}
