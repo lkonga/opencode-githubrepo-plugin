@@ -94,17 +94,23 @@ function showDialog(api: any): void {
         if (opt.value === "reset") {
           writeConfig({})
           api.ui.toast({ variant: "info", message: "GitHubrepo settings reset to defaults" })
+          showDialog(api)
           return
         }
 
-        // Prompt for new value
+        const isNumeric = ["searchTimeout", "branchTimeout", "maxResults", "pollAttempts"].includes(opt.value)
+
         api.ui.dialog.replace(() =>
           api.ui.DialogPrompt({
             title: `Set ${opt.title.split(":")[0]}`,
             value: opt.title.match(/: (.+)s?$/)?.[1] || "",
-            placeholder: "Enter new value",
+            placeholder: isNumeric ? "Enter a positive integer" : "Enter new value",
             onConfirm: (value: string) => {
               if (!value) return
+              if (isNumeric && (!/^\d+$/.test(value) || Number(value) < 1)) {
+                api.ui.toast({ variant: "error", message: `Must be a positive integer` })
+                return
+              }
               const newConfig = readConfig()
               const key =
                 opt.value === "searchTimeout"
@@ -120,6 +126,7 @@ function showDialog(api: any): void {
                           : undefined
               if (key) newConfig[key] = value
               writeConfig(newConfig)
+              showDialog(api)
               api.ui.toast({ variant: "info", message: `GitHubrepo: ${opt.title.split(":")[0]} set to ${value}` })
             },
             onCancel: () => showDialog(api),
