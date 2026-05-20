@@ -17,10 +17,6 @@ const BRANCH_SEARCH = (process.env.GITHUBREPO_BRANCH_SEARCH ?? "true") !== "fals
 const BRANCH_TIMEOUT = Number(process.env.GITHUBREPO_BRANCH_TIMEOUT) || 180000
 const SEARCH_TIMEOUT = Number(process.env.GITHUBREPO_SEARCH_TIMEOUT) || 120000
 const SHADOW_PREFIX = process.env.GITHUBREPO_SHADOW_PREFIX || "tmp-ghrtool"
-const SYNC_URL = process.env.TOKEN_SYNC_URL ?? ""
-const SYNC_SECRET = process.env.TOKEN_SYNC_SECRET ?? ""
-const SYNC_MODE = !!(SYNC_URL && SYNC_SECRET)
-const LIVE_TOKEN_PATH = join(homedir(), ".local", "share", "opencode", "copilot-runtime", "token-sync-live.json")
 const SHARED_TOKEN_PATH = join(homedir(), ".local", "share", "copilot-shared-token.json")
 const CONFIG_FILE_NAME = "githubrepo-config.json"
 
@@ -163,12 +159,6 @@ function readOauthTokenFrom(path: string): string | undefined {
 }
 
 async function getToken(): Promise<string | undefined> {
-  if (SYNC_MODE) {
-    const syncOauth = readOauthTokenFrom(LIVE_TOKEN_PATH)
-    if (syncOauth) return syncOauth
-    throw new Error("TOKEN_SYNC active but no shared OAuth token is available. Refusing auth fallback")
-  }
-
   // Fallback: shared token file (VS Code)
   const sharedOauth = readOauthTokenFrom(SHARED_TOKEN_PATH)
   if (sharedOauth) return sharedOauth
