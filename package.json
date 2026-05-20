@@ -17,7 +17,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "npm:@opencode-ai/plugin@*",
+    "@opencode-ai/plugin": "*",
     "zod": "^4.3.6"
   }
 }

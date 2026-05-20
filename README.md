@@ -9,9 +9,14 @@ OpenCode plugin for semantic code search across GitHub repositories using Copilo
 - Automatically triggers indexing for repositories that haven't been indexed yet
 - Supports branch search via persistent shadow repos
 
+## Requirements
+
+- GitHub Copilot authentication (`opencode auth` with the `github-copilot` provider)
+- Alternatively, a VS Code Copilot token at `~/.local/share/copilot-shared-token.json`
+
 ## Installation
 
-### npm
+### npm (recommended)
 
 ```json
 {
@@ -19,7 +24,17 @@ OpenCode plugin for semantic code search across GitHub repositories using Copilo
 }
 ```
 
-### Local
+If you want the `/githubrepo` TUI command, also add to `tui.json`:
+
+```json
+{
+  "plugin": ["opencode-githubrepo"]
+}
+```
+
+### Local file path (npm not desired)
+
+If you don't want to install with npm, use `file://` paths. Add to `opencode.json`:
 
 ```json
 {
@@ -27,10 +42,13 @@ OpenCode plugin for semantic code search across GitHub repositories using Copilo
 }
 ```
 
-## Requirements
+And to `tui.json` for the `/githubrepo` TUI command:
 
-- GitHub Copilot authentication via `opencode auth` (github-copilot provider)
-- Alternatively, a VS Code Copilot token at `~/.local/share/copilot-shared-token.json`
+```json
+{
+  "plugin": ["file:///path/to/opencode-githubrepo/tui.ts"]
+}
+```
 
 ## Usage
 
