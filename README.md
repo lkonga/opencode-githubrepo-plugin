@@ -11,20 +11,26 @@ OpenCode plugin for semantic code search across GitHub repositories using Copilo
 
 ## Installation
 
-Add to your `opencode.json`:
+### npm
 
 ```json
 {
-  "plugin": [
-    "/path/to/opencode-githubrepo/index.ts"
-  ]
+  "plugin": ["opencode-githubrepo"]
+}
+```
+
+### Local
+
+```json
+{
+  "plugin": ["file:///path/to/opencode-githubrepo/index.ts"]
 }
 ```
 
 ## Requirements
 
-- GitHub Copilot authentication via `~/.local/share/copilot-shared-token.json`
-- Run `opencode auth` with the `github-copilot` provider to authenticate
+- GitHub Copilot authentication via `opencode auth` (github-copilot provider)
+- Alternatively, a VS Code Copilot token at `~/.local/share/copilot-shared-token.json`
 
 ## Usage
 

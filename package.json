@@ -4,6 +4,18 @@
   "description": "OpenCode plugin: semantic code search across GitHub repositories using Copilot embeddings",
   "type": "module",
   "main": "./index.ts",
+  "files": [
+    "index.ts",
+    "tui.ts",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lkonga/opencode-githubrepo-plugin.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@opencode-ai/plugin": "npm:@opencode-ai/plugin@*",
     "zod": "^4.3.6"
