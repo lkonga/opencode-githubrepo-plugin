@@ -186,6 +186,7 @@ async function getToken(): Promise<string | undefined> {
         if (oauth) {
           const session = await exchangeSessionToken(oauth)
           if (session) return session
+          return oauth
         }
       }
     } catch { /* opencode auth not available */ }
