@@ -30,6 +30,24 @@ function readSearchConfig(): Record<string, string> {
   catch { return {} }
 }
 
+function cfgSecondsToMs(value: string | undefined, fallbackMs: number): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed * 1000 : fallbackMs
+}
+
+function envMsOrCfgSeconds(envName: string, cfgValue: string | undefined, fallbackMs: number): number {
+  const envValue = process.env[envName]
+  if (envValue !== undefined) {
+    const parsed = Number(envValue)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackMs
+  }
+  return cfgSecondsToMs(cfgValue, fallbackMs)
+}
+
+function isAbortError(err: unknown, signal?: AbortSignal): boolean {
+  return (err as any)?.name === "AbortError" || (err as any)?.name === "TimeoutError" || !!signal?.aborted
+}
+
 // ─── Description ─────────────────────────────────────────────────────────────
 
 const DESCRIPTION = `\
@@ -443,8 +461,8 @@ export const plugin: Plugin = async (_ctx) => {
         async execute(params, ctx) {
           // Read config from file (updated by /githubrepo TUI command), env vars take precedence
           const cfg = readSearchConfig()
-          const searchTimeout = Number(process.env.GITHUBREPO_SEARCH_TIMEOUT || cfg.searchTimeout) || 120000
-          const branchTimeout = Number(process.env.GITHUBREPO_BRANCH_TIMEOUT || cfg.branchTimeout) || 180000
+          const searchTimeout = envMsOrCfgSeconds("GITHUBREPO_SEARCH_TIMEOUT", cfg.searchTimeout, 120000)
+          const branchTimeout = envMsOrCfgSeconds("GITHUBREPO_BRANCH_TIMEOUT", cfg.branchTimeout, 180000)
           const maxResults = Number(process.env.GITHUBREPO_MAX_RESULTS || cfg.maxResults) || 64
           const embeddingModel = process.env.GITHUBREPO_EMBEDDING_MODEL || cfg.embeddingModel || "metis-1024-I16-Binary"
           const pollAttemptsCfg = Number(process.env.GITHUBREPO_POLL_ATTEMPTS || cfg.pollAttempts) || 10
@@ -476,8 +494,9 @@ export const plugin: Plugin = async (_ctx) => {
           let info: IndexInfo
           try {
             info = await checkIndex(searchOwner, searchRepo, token, signal)
-          } catch {
-            return "Search was aborted. Try again with a more specific query."
+          } catch (err) {
+            if (isAbortError(err, signal)) return "Search was aborted. Try again with a more specific query."
+            throw err
           }
 
           if (info.state === "error") {
@@ -512,7 +531,7 @@ export const plugin: Plugin = async (_ctx) => {
           return output
         } catch (err) {
           // Graceful abort: don't propagate timeout/abort errors as crashes
-          if ((err as any)?.name === "AbortError" || signal?.aborted) {
+          if (isAbortError(err, signal)) {
             ctx.metadata({ title: `Search aborted` })
             return "Search was aborted due to timeout. Try a more specific query."
           }
