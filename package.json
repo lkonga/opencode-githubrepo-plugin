@@ -1,5 +1,5 @@
 {
-  "name": "opencode-githubrepo",
+  "name": "@lkonga/opencode-githubrepo",
   "version": "1.0.0",
   "description": "OpenCode plugin: semantic code search across GitHub repositories using Copilot embeddings",
   "type": "module",
@@ -17,7 +17,6 @@
     "access": "public"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "*",
-    "zod": "^4.3.6"
+    "@opencode-ai/plugin": "*"
   }
 }
