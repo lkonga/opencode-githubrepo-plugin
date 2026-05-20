@@ -20,7 +20,7 @@ OpenCode plugin for semantic code search across GitHub repositories using Copilo
 
 ```json
 {
-  "plugin": ["opencode-githubrepo"]
+  "plugin": ["@lkonga/opencode-githubrepo"]
 }
 ```
 
@@ -28,7 +28,7 @@ If you want the `/githubrepo` TUI command, also add to `tui.json`:
 
 ```json
 {
-  "plugin": ["opencode-githubrepo"]
+  "plugin": ["@lkonga/opencode-githubrepo"]
 }
 ```
 
