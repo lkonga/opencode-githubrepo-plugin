@@ -3,6 +3,7 @@ import { tool } from "@opencode-ai/plugin"
 import { readFileSync } from "fs"
 import { join } from "path"
 import { homedir } from "os"
+import { execSync } from "child_process"
 
 // ─── Config from environment ─────────────────────────────────────────────────
 
@@ -172,6 +173,12 @@ async function getToken(): Promise<string | undefined> {
       if (auth?.type === "oauth") return (auth.refresh ?? auth.access) as string | undefined
     } catch { /* opencode auth not available */ }
   }
+
+  // Fallback: gh CLI token (broader scopes like repo access)
+  try {
+    const ghToken = execSync("gh auth token", { encoding: "utf-8", timeout: 5000 }).trim()
+    if (ghToken) return ghToken
+  } catch { /* gh not available */ }
 
   return undefined
 }
