@@ -471,7 +471,7 @@ export const plugin: Plugin = async (_ctx) => {
           const signal = AbortSignal.any([ctx.abort, AbortSignal.timeout(searchTimeout)])
           try {
             const token = await getToken()
-          if (!token) throw new Error("Not authenticated with GitHub Copilot. Run 'opencode auth' to log in.")
+          if (!token) throw new Error("Not authenticated with GitHub Copilot. Run 'oc auth login' (or 'opencode auth') with the github-copilot provider to authenticate.")
 
           const parsed = parseRepo(params.repo)
           if (!parsed) throw new Error(`Invalid repository format: "${params.repo}". Use "owner/repo" or a GitHub URL.`)
