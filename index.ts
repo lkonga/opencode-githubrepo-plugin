@@ -158,6 +158,18 @@ function readOauthTokenFrom(path: string): string | undefined {
   return undefined
 }
 
+async function exchangeSessionToken(oauthToken: string): Promise<string | undefined> {
+  try {
+    const res = await fetch("https://api.github.com/copilot_internal/token", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${oauthToken}`, "User-Agent": "opencode-githubrepo" },
+    })
+    if (!res.ok) return undefined
+    const data: any = await res.json()
+    return typeof data.token === "string" && data.token ? data.token : undefined
+  } catch { return undefined }
+}
+
 async function getToken(): Promise<string | undefined> {
   // Fallback: shared token file (VS Code)
   const sharedOauth = readOauthTokenFrom(SHARED_TOKEN_PATH)
@@ -169,7 +181,13 @@ async function getToken(): Promise<string | undefined> {
       const raw = readFileSync(authPath, "utf8")
       const data = JSON.parse(raw)
       const auth = data["github-copilot"]
-      if (auth?.type === "oauth") return (auth.refresh ?? auth.access) as string | undefined
+      if (auth?.type === "oauth") {
+        const oauth = (auth.refresh ?? auth.access) as string | undefined
+        if (oauth) {
+          const session = await exchangeSessionToken(oauth)
+          if (session) return session
+        }
+      }
     } catch { /* opencode auth not available */ }
   }
 
