@@ -199,7 +199,6 @@ async function checkIndex(owner: string, repo: string, token: string, signal: Ab
   })
   if (!response.ok) {
     const body = await response.text().catch(() => "")
-    console.error(`[githubrepo] checkIndex failed: HTTP ${response.status} — ${body.slice(0, 200)}`)
     return { state: "error" }
   }
   const data = await response.json()
