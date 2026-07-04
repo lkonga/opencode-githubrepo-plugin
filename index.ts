@@ -3,7 +3,6 @@ import { tool } from "@opencode-ai/plugin"
 import { readFileSync } from "fs"
 import { join } from "path"
 import { homedir } from "os"
-import { execSync } from "child_process"
 
 // ─── Config from environment ─────────────────────────────────────────────────
 
@@ -18,8 +17,43 @@ const BRANCH_SEARCH = (process.env.GITHUBREPO_BRANCH_SEARCH ?? "true") !== "fals
 const BRANCH_TIMEOUT = Number(process.env.GITHUBREPO_BRANCH_TIMEOUT) || 180000
 const SEARCH_TIMEOUT = Number(process.env.GITHUBREPO_SEARCH_TIMEOUT) || 120000
 const SHADOW_PREFIX = process.env.GITHUBREPO_SHADOW_PREFIX || "tmp-ghrtool"
-const SHARED_TOKEN_PATH = join(homedir(), ".local", "share", "copilot-shared-token.json")
 const CONFIG_FILE_NAME = "githubrepo-config.json"
+
+function defaultShareDir(): string {
+  return join(homedir(), ".local", "share")
+}
+
+function expandUserPath(p: string): string {
+  const t = p.trim()
+  if (t === "~") return homedir()
+  if (t.startsWith("~/")) return join(homedir(), t.slice(2))
+  return t
+}
+
+/** OpenCode data dir: respects XDG_DATA_HOME (e.g. fork wrapper); else ~/.local/share/opencode */
+function opencodeDataDir(): string {
+  return join(process.env.XDG_DATA_HOME ?? defaultShareDir(), "opencode")
+}
+
+/**
+ * `oc auth login github-copilot` credential files (first readable wins).
+ * 1. GITHUBREPO_AUTH_JSON — explicit override (fork path, CI, etc.)
+ * 2. authJson in $OPENCODE_CONFIG_DIR/githubrepo-config.json — same, no env
+ * 3. $XDG_DATA_HOME/opencode/auth.json — fork wrappers that set XDG_DATA_HOME
+ * 4. ~/.local/share/opencode/auth.json — upstream / vanilla OpenCode default
+ */
+function opencodeAuthJsonPaths(): string[] {
+  const paths: string[] = []
+  const push = (p: string) => {
+    if (p && !paths.includes(p)) paths.push(p)
+  }
+  const cfg = readSearchConfig()
+  if (process.env.GITHUBREPO_AUTH_JSON?.trim()) push(expandUserPath(process.env.GITHUBREPO_AUTH_JSON))
+  if (cfg.authJson?.trim()) push(expandUserPath(cfg.authJson))
+  push(join(opencodeDataDir(), "auth.json"))
+  push(join(defaultShareDir(), "opencode", "auth.json"))
+  return paths.filter(Boolean)
+}
 
 function readSearchConfig(): Record<string, string> {
   const dir = process.env.OPENCODE_CONFIG_DIR || join(homedir(), ".config", "opencode")
@@ -88,7 +122,9 @@ Examples:
   - With filters: { "repo": "owner/repo", "query": "error handling", "path": ["src/"], "lang": ["TypeScript"] }
 
 Environment variables:
-  - GITHUBREPO_OPENCODE_AUTH_FALLBACK: "false" disables fallback to ~/.local/share/opencode/auth.json
+  - GITHUBREPO_AUTH_JSON: explicit path to OpenCode auth.json (overrides auto-discovery)
+  - XDG_DATA_HOME: OpenCode data root (auth at $XDG_DATA_HOME/opencode/auth.json); standard on Linux when unset
+  - GITHUBREPO_OPENCODE_AUTH_FALLBACK: "false" disables reading OpenCode auth.json
   - GITHUBREPO_BRANCH_SEARCH: "true" (default) or "false" to disable branch search
   - GITHUBREPO_BRANCH_TIMEOUT: ms to wait for branch index (default: 180000)
   - GITHUBREPO_SHADOW_PREFIX: prefix for shadow repos (default: "tmp-ghrtool")
@@ -150,37 +186,27 @@ async function ghFetch(url: string, init: RequestInit & { signal?: AbortSignal }
   return fetch(url, init)
 }
 
-function readOauthTokenFrom(path: string): string | undefined {
+function readCopilotOauthFromAuthJson(authPath: string): string | undefined {
   try {
-    const raw = readFileSync(path, "utf8")
+    const raw = readFileSync(authPath, "utf8")
     const data = JSON.parse(raw)
-    if (data.oauth_token) return data.oauth_token as string
-  } catch { /* token file not available */ }
+    const auth = data["github-copilot"]
+    if (auth?.type === "oauth") return (auth.refresh ?? auth.access) as string | undefined
+  } catch { /* unreadable or missing */ }
+  return undefined
+}
+
+function readOpencodeCopilotOauth(): string | undefined {
+  if (process.env.GITHUBREPO_OPENCODE_AUTH_FALLBACK === "false") return undefined
+  for (const authPath of opencodeAuthJsonPaths()) {
+    const token = readCopilotOauthFromAuthJson(authPath)
+    if (token) return token
+  }
   return undefined
 }
 
 async function getToken(): Promise<string | undefined> {
-  // Fallback: shared token file (VS Code)
-  const sharedOauth = readOauthTokenFrom(SHARED_TOKEN_PATH)
-  if (sharedOauth) return sharedOauth
-
-  if (process.env.GITHUBREPO_OPENCODE_AUTH_FALLBACK !== "false") {
-    try {
-      const authPath = join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "opencode", "auth.json")
-      const raw = readFileSync(authPath, "utf8")
-      const data = JSON.parse(raw)
-      const auth = data["github-copilot"]
-      if (auth?.type === "oauth") return (auth.refresh ?? auth.access) as string | undefined
-    } catch { /* opencode auth not available */ }
-  }
-
-  // Fallback: gh CLI token (broader scopes like repo access)
-  try {
-    const ghToken = execSync("gh auth token", { encoding: "utf-8", timeout: 5000 }).trim()
-    if (ghToken) return ghToken
-  } catch { /* gh not available */ }
-
-  return undefined
+  return readOpencodeCopilotOauth()
 }
 
 interface IndexInfo {
@@ -195,9 +221,9 @@ async function checkIndex(owner: string, repo: string, token: string, signal: Ab
     signal,
   })
   if (!response.ok) {
-    if (response.status === 404) return { state: "not-indexed" }
-    const body = await response.text().catch(() => "")
-    console.error(`[githubrepo] checkIndex failed: HTTP ${response.status} — ${body.slice(0, 200)}`)
+    if (response.status === 404) {
+      return { state: "ready" }
+    }
     return { state: "error" }
   }
   const data = await response.json()
