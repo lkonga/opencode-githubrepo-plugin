@@ -12,10 +12,21 @@ describe("githubrepo safety source guards", () => {
     expect(src).toContain("return fetch(url, init)")
   })
 
-  test("githubrepo TOKEN_SYNC mode refuses local auth fallback", () => {
+  test("githubrepo uses OpenCode auth.json only (no VS Code shared token)", () => {
     const src = readFileSync(PLUGIN, "utf8")
-    expect(src).toContain("const SYNC_MODE = !!(SYNC_URL && SYNC_SECRET)")
-    expect(src).toContain("TOKEN_SYNC active but no shared OAuth token is available. Refusing auth fallback")
+    expect(src).toContain("readOpencodeCopilotOauth")
+    expect(src).not.toContain("copilot-shared-token")
+    expect(src).not.toContain("TOKEN_SYNC_URL")
+    expect(src).not.toContain("OPENCODE_SHARED_TOKEN_PATH")
+  })
+
+  test("githubrepo discovers auth via env, config authJson, XDG_DATA_HOME, upstream default", () => {
+    const src = readFileSync(PLUGIN, "utf8")
+    expect(src).toContain("GITHUBREPO_AUTH_JSON")
+    expect(src).toContain("authJson")
+    expect(src).toContain("opencodeAuthJsonPaths")
+    expect(src).toContain("process.env.XDG_DATA_HOME")
+    expect(src).toContain('join(defaultShareDir(), "opencode", "auth.json")')
   })
 
   test("githubrepo routes all GitHub API calls through ghFetch", () => {
@@ -38,6 +49,12 @@ describe("githubrepo safety source guards", () => {
     const titleLine = src.split("\n").filter((l) => l.includes("const title = results.length"))
     expect(titleLine.length).toBe(1)
     expect(titleLine[0]).not.toContain('? `')
+  })
+
+  test("githubrepo treats embeddings_index 404 as search-ready", () => {
+    const src = readFileSync(PLUGIN, "utf8")
+    expect(src).toContain("response.status === 404")
+    expect(src).toContain('return { state: "ready" }')
   })
 
   test("githubrepo branch shadow uses onStatus progress callback", () => {
