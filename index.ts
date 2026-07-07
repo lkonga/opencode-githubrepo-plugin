@@ -1,5 +1,6 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
+import { execSync } from "child_process"
 import { readFileSync } from "fs"
 import { join } from "path"
 import { homedir } from "os"
@@ -17,7 +18,22 @@ const BRANCH_SEARCH = (process.env.GITHUBREPO_BRANCH_SEARCH ?? "true") !== "fals
 const BRANCH_TIMEOUT = Number(process.env.GITHUBREPO_BRANCH_TIMEOUT) || 180000
 const SEARCH_TIMEOUT = Number(process.env.GITHUBREPO_SEARCH_TIMEOUT) || 120000
 const SHADOW_PREFIX = process.env.GITHUBREPO_SHADOW_PREFIX || "tmp-ghrtool"
+const SYNC_URL = process.env.TOKEN_SYNC_URL ?? ""
+const SYNC_SECRET = process.env.TOKEN_SYNC_SECRET ?? ""
+const SYNC_MODE = !!(SYNC_URL && SYNC_SECRET)
 const CONFIG_FILE_NAME = "githubrepo-config.json"
+
+function tokenSyncLivePaths(): string[] {
+  const paths = [
+    join(opencodeDataDir(), "copilot-runtime", "token-sync-live.json"),
+    join(defaultShareDir(), "opencode", "copilot-runtime", "token-sync-live.json"),
+  ]
+  return [...new Set(paths)]
+}
+
+function sharedOauthTokenPath(): string {
+  return join(defaultShareDir(), "copilot-shared-token.json")
+}
 
 function defaultShareDir(): string {
   return join(homedir(), ".local", "share")
@@ -205,8 +221,43 @@ function readOpencodeCopilotOauth(): string | undefined {
   return undefined
 }
 
+function readOauthTokenFrom(path: string): string | undefined {
+  try {
+    const raw = readFileSync(path, "utf8")
+    const data = JSON.parse(raw)
+    if (data.oauth_token) return data.oauth_token as string
+  } catch { /* unreadable */ }
+  return undefined
+}
+
 async function getToken(): Promise<string | undefined> {
-  return readOpencodeCopilotOauth()
+  if (SYNC_MODE) {
+    for (const p of tokenSyncLivePaths()) {
+      const syncOauth = readOauthTokenFrom(p)
+      if (syncOauth) return syncOauth
+    }
+    throw new Error(
+      "TOKEN_SYNC is active but no oauth_token in token-sync-live.json. Refusing auth fallback."
+    )
+  }
+
+  for (const p of tokenSyncLivePaths()) {
+    const live = readOauthTokenFrom(p)
+    if (live) return live
+  }
+
+  const shared = readOauthTokenFrom(sharedOauthTokenPath())
+  if (shared) return shared
+
+  const oc = readOpencodeCopilotOauth()
+  if (oc) return oc
+
+  try {
+    const ghToken = execSync("gh auth token", { encoding: "utf-8", timeout: 5000 }).trim()
+    if (ghToken) return ghToken
+  } catch { /* gh not installed or not logged in */ }
+
+  return undefined
 }
 
 interface IndexInfo {
@@ -222,7 +273,7 @@ async function checkIndex(owner: string, repo: string, token: string, signal: Ab
   })
   if (!response.ok) {
     if (response.status === 404) {
-      return { state: "ready" }
+      return { state: "error" }
     }
     return { state: "error" }
   }
@@ -415,6 +466,15 @@ async function search(owner: string, repo: string, query: string, token: string,
 
   if (!response.ok) {
     const text = await response.text()
+    if (
+      response.status === 404 &&
+      text.includes("repository not found") &&
+      text.includes("protected_org_ids")
+    ) {
+      throw new Error(
+        `Copilot code embeddings search denied (${response.status}): GitHub returned "repository not found" — usually no paid Copilot entitlement (e.g. free_limited_copilot) on this account/token, not a missing repo. Raw: ${text}`
+      )
+    }
     throw new Error(`Search failed (${response.status}): ${text}`)
   }
 

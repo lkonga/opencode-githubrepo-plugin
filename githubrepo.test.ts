@@ -12,12 +12,12 @@ describe("githubrepo safety source guards", () => {
     expect(src).toContain("return fetch(url, init)")
   })
 
-  test("githubrepo uses OpenCode auth.json only (no VS Code shared token)", () => {
+  test("githubrepo resolves auth: token-sync, shared token, OpenCode auth.json, gh", () => {
     const src = readFileSync(PLUGIN, "utf8")
     expect(src).toContain("readOpencodeCopilotOauth")
-    expect(src).not.toContain("copilot-shared-token")
-    expect(src).not.toContain("TOKEN_SYNC_URL")
-    expect(src).not.toContain("OPENCODE_SHARED_TOKEN_PATH")
+    expect(src).toContain("token-sync-live.json")
+    expect(src).toContain("copilot-shared-token")
+    expect(src).toContain("gh auth token")
   })
 
   test("githubrepo discovers auth via env, config authJson, XDG_DATA_HOME, upstream default", () => {
@@ -51,10 +51,11 @@ describe("githubrepo safety source guards", () => {
     expect(titleLine[0]).not.toContain('? `')
   })
 
-  test("githubrepo treats embeddings_index 404 as search-ready", () => {
+  test("githubrepo treats embeddings_index 404 as error (not ready)", () => {
     const src = readFileSync(PLUGIN, "utf8")
     expect(src).toContain("response.status === 404")
-    expect(src).toContain('return { state: "ready" }')
+    expect(src).toContain('return { state: "error" }')
+    expect(src).not.toMatch(/404[\s\S]{0,80}state:\s*"ready"/)
   })
 
   test("githubrepo branch shadow uses onStatus progress callback", () => {
