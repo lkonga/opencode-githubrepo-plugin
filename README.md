@@ -1,6 +1,16 @@
 # opencode-githubrepo
 
-OpenCode plugin for semantic code search across GitHub repositories using Copilot's embeddings index.
+**v1.0.10** — OpenCode plugin for semantic code search across GitHub repositories using GitHub’s Copilot embeddings API (`api.github.com`). No fork patches, no CAPI proxy, no `opencode-patches` dependency.
+
+## Quick start (anyone)
+
+1. Install the plugin (see [Installation](#installation)).
+2. Authenticate with **at least one** of:
+   - **OpenCode (recommended for Copilot subscribers):** `oc auth login` → **github-copilot** (writes `auth.json`).
+   - **GitHub CLI (needed for many private repos):** `gh auth login` and ensure `repo` scope (`gh auth refresh -s repo`). The plugin runs `gh auth token` automatically.
+3. Restart OpenCode after installing or changing auth.
+
+**Default behavior:** tries Copilot OAuth first, then **`gh auth token`** once if GitHub returns a scope/entitlement 404. For mostly private repos, set `GITHUBREPO_PREFER_GH=1` to try `gh` first.
 
 ## What it does
 
@@ -11,30 +21,28 @@ OpenCode plugin for semantic code search across GitHub repositories using Copilo
 
 ## Requirements
 
-- GitHub Copilot OAuth via OpenCode: run `oc auth login` and choose **github-copilot**.
+- A **GitHub Copilot** subscription (embeddings search is a Copilot API).
+- **Auth:** Copilot OAuth in OpenCode **and/or** `gh` CLI logged in (see [Quick start](#quick-start-anyone)).
 
-**Auth file resolution (first hit wins):**
+### Where OpenCode stores Copilot OAuth (`auth.json`, first readable path wins)
 
-| Priority | Source | Typical use |
-|----------|--------|-------------|
-| 1 | `GITHUBREPO_AUTH_JSON` | Explicit path when the OpenCode process does not inherit your wrapper env |
-| 2 | `authJson` in `$OPENCODE_CONFIG_DIR/githubrepo-config.json` | Same, checked into host env config |
-| 3 | `$XDG_DATA_HOME/opencode/auth.json` | Fork wrapper sets `XDG_DATA_HOME` (e.g. `~/.local/share/opencode-fork`) |
-| 4 | `~/.local/share/opencode/auth.json` | Upstream / vanilla OpenCode (distribution default) |
+| Priority | Path |
+|----------|------|
+| 1 | `GITHUBREPO_AUTH_JSON` env |
+| 2 | `authJson` in `$OPENCODE_CONFIG_DIR/githubrepo-config.json` |
+| 3 | `$XDG_DATA_HOME/opencode/auth.json` (if your distro sets `XDG_DATA_HOME`) |
+| 4 | `~/.local/share/opencode/auth.json` (**vanilla / upstream OpenCode**) |
 
-Fork users: if the wrapper exports `XDG_DATA_HOME`, step 3 is enough. If `githubrepo` still fails to authenticate, set step 1 or 2 to your fork auth file, e.g. `~/.local/share/opencode-fork/opencode/auth.json`.
+### Token modes (default = plugin-only)
 
-## Token resolution for embeddings search
+| Mode | Primary | On scope 404, retry with |
+|------|---------|---------------------------|
+| **Default** | `auth.json` Copilot OAuth | `gh auth token` |
+| `GITHUBREPO_PREFER_GH=1` | `gh auth token` | Copilot OAuth |
 
-The plugin is **self-contained by default** — it does not depend on `opencode-patches` or a shared token-sync daemon. Token order for `POST /embeddings/code/search`:
+**Why two tokens?** Copilot OAuth has **Copilot entitlement** (many public/org repos) but often lacks **`repo` scope** for your private repos. `gh auth token` usually has **`repo`** but not entitlement. The plugin retries once with the other token automatically.
 
-| Mode | Primary token | Scope-404 retry | Covers |
-|------|---------------|-----------------|--------|
-| **Default** (plugin-only) | OpenCode `auth.json` Copilot OAuth | `gh auth token` | Public (entitlement-gated) → private (one retry) |
-| `GITHUBREPO_PREFER_GH=1` | `gh auth token` | Copilot OAuth | Private-repo-heavy use (skips the wasted OAuth 404) |
-| `TOKEN_SYNC_URL`+`TOKEN_SYNC_SECRET` (opt-in) | `token-sync-live.json` → `copilot-shared-token.json` | none | Legacy shared-token infra only; refuses other fallbacks |
-
-Why two tokens? Copilot OAuth carries the **Copilot entitlement** (public repos gated behind it, e.g. `microsoft/vscode-copilot-chat`) but lacks classic `repo` scope for private repos. `gh auth token` (classic PAT) has `repo` scope (private repos) but no Copilot entitlement. The scope-404 retry bridges this automatically — see `isEmbeddingsScopeDenied` + `pickScopeFallback` in `index.ts` (unit-tested in `githubrepo.test.ts`).
+**Advanced (optional):** If both `TOKEN_SYNC_URL` and `TOKEN_SYNC_SECRET` are set, the plugin uses legacy shared-token files only and **does not** fall back to `auth.json` / `gh`. Most users should leave these unset.
 
 ## Installation
 
@@ -121,6 +129,4 @@ Plugin/harness token bugs (rows 1 & 4) are *plugin-fixable*; bad `owner/repo` (r
 
 ## Origin
 
-Ported from the `patch-githubrepo.ts` fork patch in [opencode-patches](https://github.com/lkonga/opencode-patches).
-The original implementation was injected directly into the opencode source tree; this plugin version
-uses the official OpenCode plugin API and requires no source modifications.
+Originally ported from a fork patch; **v1.0.9+** is a standalone OpenCode plugin (official plugin API only, no source patches).
