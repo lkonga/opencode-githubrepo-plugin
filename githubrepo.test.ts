@@ -51,11 +51,10 @@ describe("githubrepo safety source guards", () => {
     expect(titleLine[0]).not.toContain('? `')
   })
 
-  test("githubrepo treats embeddings_index 404 as error (not ready)", () => {
+  test("githubrepo treats embeddings_index 404 as search-ready (index probe optional)", () => {
     const src = readFileSync(PLUGIN, "utf8")
     expect(src).toContain("response.status === 404")
-    expect(src).toContain('return { state: "error" }')
-    expect(src).not.toMatch(/404[\s\S]{0,80}state:\s*"ready"/)
+    expect(src).toMatch(/404[\s\S]{0,120}state:\s*"ready"/)
   })
 
   test("githubrepo branch shadow uses onStatus progress callback", () => {

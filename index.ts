@@ -272,8 +272,9 @@ async function checkIndex(owner: string, repo: string, token: string, signal: Ab
     signal,
   })
   if (!response.ok) {
+    // GitHub often 404s embeddings_index while POST /embeddings/code/search still works (VS Code github_repo tool behavior).
     if (response.status === 404) {
-      return { state: "error" }
+      return { state: "ready" }
     }
     return { state: "error" }
   }
