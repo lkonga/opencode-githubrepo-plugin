@@ -1,14 +1,16 @@
 # opencode-githubrepo
 
-**v1.0.10** — OpenCode plugin for semantic code search across GitHub repositories using GitHub’s Copilot embeddings API (`api.github.com`). No fork patches, no CAPI proxy, no `opencode-patches` dependency.
+**v1.0.11** — OpenCode plugin for semantic code search across GitHub repositories using GitHub’s Copilot embeddings API (`api.github.com`). No fork patches, no CAPI proxy, no `opencode-patches` dependency.
 
 ## Quick start (anyone)
 
 1. Install the plugin (see [Installation](#installation)).
-2. Authenticate with **at least one** of:
-   - **OpenCode (recommended for Copilot subscribers):** `oc auth login` → **github-copilot** (writes `auth.json`).
-   - **GitHub CLI (needed for many private repos):** `gh auth login` and ensure `repo` scope (`gh auth refresh -s repo`). The plugin runs `gh auth token` automatically.
+2. Authenticate:
+   - **OpenCode (required for Copilot API):** `opencode auth login` → **github-copilot** → `~/.local/share/opencode/auth.json`.
+   - **GitHub CLI (required for private repos):** `gh auth login` + `repo` scope (`gh auth refresh -s repo`). Without `gh`, many **public** repos work; **private** search, indexing, and branch/shadow flows typically need `gh auth token`.
 3. Restart OpenCode after installing or changing auth.
+
+**Zero config:** no `OPENCODE_CONFIG_DIR`, `TOKEN_SYNC_*`, or fork wrapper required. Auth defaults to `~/.local/share/opencode/auth.json` (same as upstream OpenCode docs); optional `githubrepo-config.json` only for tuning timeouts.
 
 **Default behavior:** tries Copilot OAuth first, then **`gh auth token`** once if GitHub returns a scope/entitlement 404. For mostly private repos, set `GITHUBREPO_PREFER_GH=1` to try `gh` first.
 
@@ -22,7 +24,7 @@
 ## Requirements
 
 - A **GitHub Copilot** subscription (embeddings search is a Copilot API).
-- **Auth:** Copilot OAuth in OpenCode **and/or** `gh` CLI logged in (see [Quick start](#quick-start-anyone)).
+- **Auth:** Copilot OAuth in OpenCode **plus** `gh` when you need **private** repos (see [Quick start](#quick-start-anyone)). Future: [issue #12](https://github.com/lkonga/opencode-githubrepo-plugin/issues/12) tracks reducing `gh` dependency via upstream `repo` scope on Copilot login.
 
 ### Where OpenCode stores Copilot OAuth (`auth.json`, first readable path wins)
 

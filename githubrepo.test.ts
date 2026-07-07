@@ -4,8 +4,7 @@ import { resolve } from "path"
 import { isEmbeddingsScopeDenied, pickPrimaryToken, pickScopeFallback } from "./index"
 import type { CopilotTokens } from "./index"
 
-const ROOT = resolve(__dirname, "..")
-const PLUGIN = "/home/lkonga/codes/opencode-plugins/opencode-githubrepo/index.ts"
+const PLUGIN = resolve(import.meta.dir, "index.ts")
 
 describe("githubrepo safety source guards", () => {
   test("githubrepo has a ghFetch wrapper", () => {
@@ -22,13 +21,13 @@ describe("githubrepo safety source guards", () => {
     expect(src).toContain("gh auth token")
   })
 
-  test("githubrepo discovers auth via env, config authJson, XDG_DATA_HOME, upstream default", () => {
+  test("githubrepo discovers auth: optional overrides then upstream vanilla auth.json", () => {
     const src = readFileSync(PLUGIN, "utf8")
     expect(src).toContain("GITHUBREPO_AUTH_JSON")
     expect(src).toContain("authJson")
     expect(src).toContain("opencodeAuthJsonPaths")
-    expect(src).toContain("process.env.XDG_DATA_HOME")
     expect(src).toContain('join(defaultShareDir(), "opencode", "auth.json")')
+    expect(src).toMatch(/xdgAuth !== vanilla/)
   })
 
   test("githubrepo routes all GitHub API calls through ghFetch", () => {

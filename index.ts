@@ -55,11 +55,8 @@ function opencodeDataDir(): string {
 }
 
 /**
- * `oc auth login github-copilot` credential files (first readable wins).
- * 1. GITHUBREPO_AUTH_JSON — explicit override (fork path, CI, etc.)
- * 2. authJson in $OPENCODE_CONFIG_DIR/githubrepo-config.json — same, no env
- * 3. $XDG_DATA_HOME/opencode/auth.json — fork wrappers that set XDG_DATA_HOME
- * 4. ~/.local/share/opencode/auth.json — upstream / vanilla OpenCode default
+ * OpenCode Copilot OAuth (`github-copilot` in auth.json). First readable wins.
+ * Defaults match upstream: ~/.local/share/opencode/auth.json (no wrapper env required).
  */
 function opencodeAuthJsonPaths(): string[] {
   const paths: string[] = []
@@ -69,8 +66,10 @@ function opencodeAuthJsonPaths(): string[] {
   const cfg = readSearchConfig()
   if (process.env.GITHUBREPO_AUTH_JSON?.trim()) push(expandUserPath(process.env.GITHUBREPO_AUTH_JSON))
   if (cfg.authJson?.trim()) push(expandUserPath(cfg.authJson))
-  push(join(opencodeDataDir(), "auth.json"))
-  push(join(defaultShareDir(), "opencode", "auth.json"))
+  const vanilla = join(defaultShareDir(), "opencode", "auth.json")
+  push(vanilla)
+  const xdgAuth = join(opencodeDataDir(), "auth.json")
+  if (xdgAuth !== vanilla) push(xdgAuth)
   return paths.filter(Boolean)
 }
 
@@ -190,15 +189,6 @@ function hdrs(token: string): Record<string, string> {
     "X-GitHub-Api-Version": API_VERSION,
     "User-Agent": process.env.GITHUBREPO_USER_AGENT ?? "GitHubCopilot/1.0",
   }
-}
-
-function getToolProxy(): string | undefined {
-  const userProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy
-  if (userProxy) return userProxy
-  const proxyHost = process.env.PROXY_HOST
-  const proxyPort = process.env.PROXY_PORT || "18289"
-  if (proxyHost) return `http://${proxyHost}:${proxyPort}`
-  return undefined
 }
 
 async function ghFetch(url: string, init: RequestInit & { signal?: AbortSignal } = {}) {
@@ -620,7 +610,11 @@ export const plugin: Plugin = async (_ctx) => {
           const signal = AbortSignal.any([ctx.abort, AbortSignal.timeout(searchTimeout)])
           try {
             const token = await getToken()
-          if (!token) throw new Error("Not authenticated with GitHub Copilot. Run 'oc auth login' (or 'opencode auth') with the github-copilot provider to authenticate.")
+          if (!token) {
+            throw new Error(
+              "Not authenticated for GitHub Copilot embeddings. Run `opencode auth login` and choose github-copilot, and/or `gh auth login` (repo scope for private repos). No custom env or fork wrapper required."
+            )
+          }
 
           const parsed = parseRepo(params.repo)
           if (!parsed) throw new Error(`Invalid repository format: "${params.repo}". Use "owner/repo" or a GitHub URL.`)
