@@ -230,6 +230,15 @@ function readOauthTokenFrom(path: string): string | undefined {
   return undefined
 }
 
+function getGhCliToken(): string | undefined {
+  try {
+    const ghToken = execSync("gh auth token", { encoding: "utf-8", timeout: 5000 }).trim()
+    return ghToken || undefined
+  } catch {
+    return undefined
+  }
+}
+
 async function getToken(): Promise<string | undefined> {
   if (SYNC_MODE) {
     for (const p of tokenSyncLivePaths()) {
@@ -252,12 +261,7 @@ async function getToken(): Promise<string | undefined> {
   const oc = readOpencodeCopilotOauth()
   if (oc) return oc
 
-  try {
-    const ghToken = execSync("gh auth token", { encoding: "utf-8", timeout: 5000 }).trim()
-    if (ghToken) return ghToken
-  } catch { /* gh not installed or not logged in */ }
-
-  return undefined
+  return getGhCliToken()
 }
 
 interface IndexInfo {
@@ -445,13 +449,24 @@ interface SearchResult {
   location: { path: string; commit_sha: string; ref_name?: string; repo: { nwo: string; url: string } }
 }
 
-async function search(owner: string, repo: string, query: string, token: string, signal: AbortSignal, path?: string[], lang?: string[], opts?: { maxResults?: number; embeddingModel?: string }): Promise<SearchResult[]> {
-  const encoder = new TextEncoder()
-  let trimmed = query
-  while (encoder.encode(trimmed).length > MAX_QUERY_BYTES) {
-    trimmed = trimmed.slice(0, -100)
-  }
+function isEmbeddingsScopeDenied(status: number, text: string): boolean {
+  return (
+    status === 404 &&
+    text.includes("repository not found") &&
+    text.includes("protected_org_ids")
+  )
+}
 
+async function searchOnce(
+  owner: string,
+  repo: string,
+  trimmed: string,
+  token: string,
+  signal: AbortSignal,
+  path?: string[],
+  lang?: string[],
+  opts?: { maxResults?: number; embeddingModel?: string }
+): Promise<{ ok: true; results: SearchResult[] } | { ok: false; status: number; text: string }> {
   const response = await ghFetch(`${API}/embeddings/code/search`, {
     method: "POST",
     headers: hdrs(token),
@@ -466,21 +481,43 @@ async function search(owner: string, repo: string, query: string, token: string,
   })
 
   if (!response.ok) {
-    const text = await response.text()
-    if (
-      response.status === 404 &&
-      text.includes("repository not found") &&
-      text.includes("protected_org_ids")
-    ) {
-      throw new Error(
-        `Copilot code embeddings search denied (${response.status}): GitHub returned "repository not found" — usually no paid Copilot entitlement (e.g. free_limited_copilot) on this account/token, not a missing repo. Raw: ${text}`
-      )
-    }
-    throw new Error(`Search failed (${response.status}): ${text}`)
+    return { ok: false, status: response.status, text: await response.text() }
   }
 
   const data = await response.json()
-  return data.results ?? []
+  return { ok: true, results: data.results ?? [] }
+}
+
+async function search(owner: string, repo: string, query: string, token: string, signal: AbortSignal, path?: string[], lang?: string[], opts?: { maxResults?: number; embeddingModel?: string }): Promise<SearchResult[]> {
+  const encoder = new TextEncoder()
+  let trimmed = query
+  while (encoder.encode(trimmed).length > MAX_QUERY_BYTES) {
+    trimmed = trimmed.slice(0, -100)
+  }
+
+  let attempt = await searchOnce(owner, repo, trimmed, token, signal, path, lang, opts)
+  if (!attempt.ok && isEmbeddingsScopeDenied(attempt.status, attempt.text)) {
+    const ghToken = getGhCliToken()
+    if (ghToken && ghToken !== token) {
+      const retry = await searchOnce(owner, repo, trimmed, ghToken, signal, path, lang, opts)
+      if (retry.ok) return retry.results
+      if (!retry.ok) attempt = retry
+    }
+  }
+
+  if (!attempt.ok) {
+    const { status, text } = attempt
+    if (isEmbeddingsScopeDenied(status, text)) {
+      throw new Error(
+        `Embeddings search returned 404 "repository not found" for repo:${owner}/${repo} with the current token(s). ` +
+          `This is often a token-scope issue (Copilot OAuth vs \`gh auth token\`) or missing Copilot indexing for that repo — not a malformed owner/repo. ` +
+          `Use exact "owner/repo" (case-sensitive owner). Raw: ${text}`
+      )
+    }
+    throw new Error(`Search failed (${status}): ${text}`)
+  }
+
+  return attempt.results
 }
 
 function dedupeAndFilter(results: SearchResult[]): SearchResult[] {
