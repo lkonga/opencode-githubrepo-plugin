@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { readFileSync } from "fs"
 import { resolve } from "path"
-import { isEmbeddingsScopeDenied, pickPrimaryToken, pickScopeFallback } from "./index"
+import { isEmbeddingsScopeDenied, needsShadowBranch, pickPrimaryToken, pickScopeFallback } from "./index"
 import type { CopilotTokens } from "./index"
 
 const PLUGIN = resolve(import.meta.dir, "index.ts")
@@ -61,6 +61,12 @@ describe("githubrepo safety source guards", () => {
   test("githubrepo branch shadow uses onStatus progress callback", () => {
     const src = readFileSync(PLUGIN, "utf8")
     expect(src).toContain('(msg) => ctx.metadata({ title: msg })')
+  })
+
+  test("githubrepo checks the repository default branch before shadow mode", () => {
+    const src = readFileSync(PLUGIN, "utf8")
+    expect(src).toContain("getDefaultBranch(parsed.owner, parsed.repo, token, signal)")
+    expect(src).toContain("needsShadowBranch(branch, defaultBranch, branchSearch)")
   })
 
   test("githubrepo makes token-sync / shared-token opt-in only (SYNC_MODE) and supports PREFER_GH", () => {
@@ -140,5 +146,25 @@ describe("githubrepo embeddings scope-404 detection — isEmbeddingsScopeDenied"
   test("rejects non-404 statuses even if the body text matches", () => {
     expect(isEmbeddingsScopeDenied(401, '{"message":"repository not found","protected_org_ids":[]}')).toBe(false)
     expect(isEmbeddingsScopeDenied(500, "repository not found protected_org_ids")).toBe(false)
+  })
+})
+
+describe("githubrepo branch shadow decisions — needsShadowBranch", () => {
+  test("skips shadow mode when the requested branch is the repository default", () => {
+    expect(needsShadowBranch("main", "main", true)).toBe(false)
+    expect(needsShadowBranch("dev", "dev", true)).toBe(false)
+  })
+
+  test("uses shadow mode for known non-default branches", () => {
+    expect(needsShadowBranch("feature/search", "main", true)).toBe(true)
+  })
+
+  test("keeps old branch-search behavior when default branch detection is unavailable", () => {
+    expect(needsShadowBranch("main", undefined, true)).toBe(true)
+  })
+
+  test("respects branch-search disablement and omitted branch", () => {
+    expect(needsShadowBranch("feature/search", "main", false)).toBe(false)
+    expect(needsShadowBranch(undefined, "main", true)).toBe(false)
   })
 })

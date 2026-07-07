@@ -341,6 +341,22 @@ async function getAuthUser(token: string, signal: AbortSignal): Promise<string |
   return data.login
 }
 
+async function getDefaultBranch(owner: string, repo: string, token: string, signal: AbortSignal): Promise<string | undefined> {
+  try {
+    const res = await ghFetch(`${API}/repos/${owner}/${repo}`, { headers: hdrs(token), signal })
+    if (!res.ok) return undefined
+    const data = await res.json()
+    return typeof data.default_branch === "string" && data.default_branch ? data.default_branch : undefined
+  } catch (err) {
+    if (isAbortError(err, signal)) throw err
+    return undefined
+  }
+}
+
+export function needsShadowBranch(branch: string | undefined, defaultBranch: string | undefined, branchSearch: boolean): boolean {
+  return !!branch && branchSearch && (!defaultBranch || branch !== defaultBranch)
+}
+
 async function setDefaultBranch(owner: string, repo: string, branch: string, token: string, signal: AbortSignal): Promise<boolean> {
   const res = await ghFetch(`${API}/repos/${owner}/${repo}`, {
     method: "PATCH",
@@ -619,8 +635,9 @@ export const plugin: Plugin = async (_ctx) => {
           const parsed = parseRepo(params.repo)
           if (!parsed) throw new Error(`Invalid repository format: "${params.repo}". Use "owner/repo" or a GitHub URL.`)
 
-          const branch = params.branch ?? parsed.branch
-          const needsBranch = !!branch && branchSearch
+          const branch = (params.branch ?? parsed.branch)?.trim()
+          const defaultBranch = branch ? await getDefaultBranch(parsed.owner, parsed.repo, token, signal) : undefined
+          const needsBranch = needsShadowBranch(branch, defaultBranch, branchSearch)
           const pollAttempts = needsBranch ? Math.ceil(branchTimeout / POLL_DELAY) : pollAttemptsCfg
 
           let searchOwner = parsed.owner
