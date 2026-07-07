@@ -692,4 +692,4 @@ export const plugin: Plugin = async (_ctx) => {
   }
 }
 
-export default plugin
+export default { id: "opencode-githubrepo", server: plugin }
