@@ -1,6 +1,6 @@
 # githubrepo 404 incident — deferred deep dive
 
-**Status:** Tool working (`microsoft/vscode-copilot-chat` verified). Defer root-cause write-up.
+**Status:** **v1.0.9** — prod smoke OK (privates + `microsoft/vscode-copilot-chat`). Defer root-cause write-up.
 
 ## GitHub issue
 
