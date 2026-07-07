@@ -21,6 +21,9 @@ const SHADOW_PREFIX = process.env.GITHUBREPO_SHADOW_PREFIX || "tmp-ghrtool"
 const SYNC_URL = process.env.TOKEN_SYNC_URL ?? ""
 const SYNC_SECRET = process.env.TOKEN_SYNC_SECRET ?? ""
 const SYNC_MODE = !!(SYNC_URL && SYNC_SECRET)
+// Prefer `gh auth token` for search primary (private-repo-heavy use); flips the scope-404
+// retry direction too. Default (unset) keeps Copilot OAuth primary (entitlement-gated public repos).
+const PREFER_GH = (process.env.GITHUBREPO_PREFER_GH ?? "") === "1"
 const CONFIG_FILE_NAME = "githubrepo-config.json"
 
 function tokenSyncLivePaths(): string[] {
@@ -239,29 +242,51 @@ function getGhCliToken(): string | undefined {
   }
 }
 
+/**
+ * Candidate tokens for embeddings search (plugin-only; token-sync is opt-in via SYNC_MODE).
+ *   - copilotOauth: OpenCode auth.json `github-copilot` OAuth — covers entitlement-gated PUBLIC repos
+ *   - gh: `gh auth token` — covers PRIVATE repos (classic PAT repo scope)
+ */
+export interface CopilotTokens {
+  copilotOauth?: string
+  gh?: string
+}
+
+export function resolveCopilotTokens(): CopilotTokens {
+  return { copilotOauth: readOpencodeCopilotOauth(), gh: getGhCliToken() }
+}
+
+/** Pick the primary token for embeddings search. `preferGh` (GITHUBREPO_PREFER_GH=1) reverses the order. */
+export function pickPrimaryToken(tokens: CopilotTokens, preferGh: boolean): string | undefined {
+  return preferGh ? (tokens.gh ?? tokens.copilotOauth) : (tokens.copilotOauth ?? tokens.gh)
+}
+
+/** Pick the OTHER token to retry on an embeddings scope-404 (bidirectional fallback). */
+export function pickScopeFallback(primaryToken: string | undefined, tokens: CopilotTokens): string | undefined {
+  if (primaryToken && primaryToken === tokens.gh) return tokens.copilotOauth
+  if (primaryToken && primaryToken === tokens.copilotOauth) return tokens.gh
+  return tokens.gh ?? tokens.copilotOauth
+}
+
 async function getToken(): Promise<string | undefined> {
+  // Explicit opt-in legacy infra (TOKEN_SYNC_URL + TOKEN_SYNC_SECRET both set):
+  // token-sync-live.json then copilot-shared-token.json. Refuses any other fallback.
   if (SYNC_MODE) {
     for (const p of tokenSyncLivePaths()) {
       const syncOauth = readOauthTokenFrom(p)
       if (syncOauth) return syncOauth
     }
+    const shared = readOauthTokenFrom(sharedOauthTokenPath())
+    if (shared) return shared
     throw new Error(
-      "TOKEN_SYNC is active but no oauth_token in token-sync-live.json. Refusing auth fallback."
+      "TOKEN_SYNC is active but no oauth_token in token-sync-live.json or copilot-shared-token.json. Refusing auth fallback."
     )
   }
 
-  for (const p of tokenSyncLivePaths()) {
-    const live = readOauthTokenFrom(p)
-    if (live) return live
-  }
-
-  const shared = readOauthTokenFrom(sharedOauthTokenPath())
-  if (shared) return shared
-
-  const oc = readOpencodeCopilotOauth()
-  if (oc) return oc
-
-  return getGhCliToken()
+  // Plugin-only default (no token-sync / shared-token dependency):
+  //   Copilot OAuth (entitlement-gated public repos) → `gh auth token` (private repos).
+  //   Set GITHUBREPO_PREFER_GH=1 to reverse (private-repo-heavy use skips the Copilot-OAuth 404).
+  return pickPrimaryToken(resolveCopilotTokens(), PREFER_GH)
 }
 
 interface IndexInfo {
@@ -449,7 +474,7 @@ interface SearchResult {
   location: { path: string; commit_sha: string; ref_name?: string; repo: { nwo: string; url: string } }
 }
 
-function isEmbeddingsScopeDenied(status: number, text: string): boolean {
+export function isEmbeddingsScopeDenied(status: number, text: string): boolean {
   return (
     status === 404 &&
     text.includes("repository not found") &&
@@ -497,9 +522,11 @@ async function search(owner: string, repo: string, query: string, token: string,
 
   let attempt = await searchOnce(owner, repo, trimmed, token, signal, path, lang, opts)
   if (!attempt.ok && isEmbeddingsScopeDenied(attempt.status, attempt.text)) {
-    const ghToken = getGhCliToken()
-    if (ghToken && ghToken !== token) {
-      const retry = await searchOnce(owner, repo, trimmed, ghToken, signal, path, lang, opts)
+    // Scope-404: the primary token lacks repo/embeddings scope. Retry once with the
+    // other candidate token (Copilot OAuth <-> gh) -- bidirectional per GITHUBREPO_PREFER_GH.
+    const fallback = pickScopeFallback(token, resolveCopilotTokens())
+    if (fallback && fallback !== token) {
+      const retry = await searchOnce(owner, repo, trimmed, fallback, signal, path, lang, opts)
       if (retry.ok) return retry.results
       if (!retry.ok) attempt = retry
     }

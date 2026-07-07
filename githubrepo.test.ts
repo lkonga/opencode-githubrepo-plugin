@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { readFileSync } from "fs"
 import { resolve } from "path"
+import { isEmbeddingsScopeDenied, pickPrimaryToken, pickScopeFallback } from "./index"
+import type { CopilotTokens } from "./index"
 
 const ROOT = resolve(__dirname, "..")
 const PLUGIN = "/home/lkonga/codes/opencode-plugins/opencode-githubrepo/index.ts"
@@ -60,5 +62,84 @@ describe("githubrepo safety source guards", () => {
   test("githubrepo branch shadow uses onStatus progress callback", () => {
     const src = readFileSync(PLUGIN, "utf8")
     expect(src).toContain('(msg) => ctx.metadata({ title: msg })')
+  })
+
+  test("githubrepo makes token-sync / shared-token opt-in only (SYNC_MODE) and supports PREFER_GH", () => {
+    const src = readFileSync(PLUGIN, "utf8")
+    expect(src).toContain("if (SYNC_MODE) {")
+    expect(src).toContain("GITHUBREPO_PREFER_GH")
+    expect(src).toContain("pickPrimaryToken")
+    expect(src).toContain("pickScopeFallback")
+    // scope-404 retry is bidirectional (not hardcoded to gh)
+    expect(src).toContain("pickScopeFallback(token, resolveCopilotTokens())")
+  })
+})
+
+describe("githubrepo token selection — pickPrimaryToken", () => {
+  const oauth = "copilot-oauth-aaa"
+  const gh = "gh-token-bbb"
+  const both: CopilotTokens = { copilotOauth: oauth, gh }
+
+  test("defaults to Copilot OAuth first (entitlement-gated public repos)", () => {
+    expect(pickPrimaryToken(both, false)).toBe(oauth)
+  })
+
+  test("prefers gh when preferGh=true (private-repo-heavy use)", () => {
+    expect(pickPrimaryToken(both, true)).toBe(gh)
+  })
+
+  test("falls back to the other token when one is missing", () => {
+    expect(pickPrimaryToken({ gh }, false)).toBe(gh)
+    expect(pickPrimaryToken({ copilotOauth: oauth }, true)).toBe(oauth)
+  })
+
+  test("returns undefined when neither token is available", () => {
+    expect(pickPrimaryToken({}, false)).toBeUndefined()
+    expect(pickPrimaryToken({}, true)).toBeUndefined()
+  })
+})
+
+describe("githubrepo scope-404 retry — pickScopeFallback", () => {
+  const oauth = "copilot-oauth-aaa"
+  const gh = "gh-token-bbb"
+  const both: CopilotTokens = { copilotOauth: oauth, gh }
+
+  test("returns gh when primary was Copilot OAuth (92ce410 default behavior)", () => {
+    expect(pickScopeFallback(oauth, both)).toBe(gh)
+  })
+
+  test("returns Copilot OAuth when primary was gh (PREFER_GH reversed direction)", () => {
+    expect(pickScopeFallback(gh, both)).toBe(oauth)
+  })
+
+  test("returns undefined when no other token exists (no retry possible)", () => {
+    expect(pickScopeFallback(oauth, { copilotOauth: oauth })).toBeUndefined()
+    expect(pickScopeFallback(gh, { gh })).toBeUndefined()
+  })
+
+  test("never returns the same token as the primary", () => {
+    expect(pickScopeFallback(oauth, both)).not.toBe(oauth)
+    expect(pickScopeFallback(gh, both)).not.toBe(gh)
+  })
+
+  test("uses gh then oauth when primary is an unknown token (SYNC/env path)", () => {
+    expect(pickScopeFallback("sync-or-env-token", both)).toBe(gh)
+    expect(pickScopeFallback("sync-or-env-token", { copilotOauth: oauth })).toBe(oauth)
+  })
+})
+
+describe("githubrepo embeddings scope-404 detection — isEmbeddingsScopeDenied", () => {
+  test("matches 404 repository-not-found carrying protected_org_ids", () => {
+    expect(isEmbeddingsScopeDenied(404, '{"message":"repository not found","protected_org_ids":[]}')).toBe(true)
+  })
+
+  test("rejects 404 without protected_org_ids (plain Not Found = bad owner/repo, not a scope issue)", () => {
+    expect(isEmbeddingsScopeDenied(404, '{"message":"Not Found"}')).toBe(false)
+    expect(isEmbeddingsScopeDenied(404, "repository not found")).toBe(false)
+  })
+
+  test("rejects non-404 statuses even if the body text matches", () => {
+    expect(isEmbeddingsScopeDenied(401, '{"message":"repository not found","protected_org_ids":[]}')).toBe(false)
+    expect(isEmbeddingsScopeDenied(500, "repository not found protected_org_ids")).toBe(false)
   })
 })
