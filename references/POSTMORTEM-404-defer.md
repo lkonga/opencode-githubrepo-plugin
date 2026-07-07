@@ -2,11 +2,9 @@
 
 **Status:** Tool working (`microsoft/vscode-copilot-chat` verified). Defer root-cause write-up.
 
-## Ticket (Todoist / backlog)
+## GitHub issue
 
-- **Title:** Analyze githubrepo 404 PM — surgical refactor?
-- **Priority:** P3
-- **When:** later (no urgency)
+https://github.com/lkonga/opencode-githubrepo-plugin/issues/8 — follow-up PM, surgical refactor, migration cleanup (no creds in issue).
 
 ## One-line fix (for later analysis)
 
