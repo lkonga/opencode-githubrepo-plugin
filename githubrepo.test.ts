@@ -1,7 +1,15 @@
 import { describe, expect, test } from "bun:test"
 import { readFileSync } from "fs"
 import { resolve } from "path"
-import { isEmbeddingsScopeDenied, pickPrimaryToken, pickScopeFallback } from "./index"
+import {
+  buildScopingQuery,
+  coerceStringArray,
+  filterResultsByPathPrefix,
+  isEmbeddingsScopeDenied,
+  pickPrimaryToken,
+  pickScopeFallback,
+} from "./index"
+import type { SearchResult } from "./index"
 import type { CopilotTokens } from "./index"
 
 const PLUGIN = resolve(import.meta.dir, "index.ts")
@@ -140,5 +148,32 @@ describe("githubrepo embeddings scope-404 detection — isEmbeddingsScopeDenied"
   test("rejects non-404 statuses even if the body text matches", () => {
     expect(isEmbeddingsScopeDenied(401, '{"message":"repository not found","protected_org_ids":[]}')).toBe(false)
     expect(isEmbeddingsScopeDenied(500, "repository not found protected_org_ids")).toBe(false)
+  })
+})
+
+describe("githubrepo path whitelist helpers", () => {
+  test("coerceStringArray accepts array or string", () => {
+    expect(coerceStringArray(["sessions"])).toEqual(["sessions"])
+    expect(coerceStringArray("sessions")).toEqual(["sessions"])
+    expect(coerceStringArray(undefined)).toBeUndefined()
+  })
+
+  test("buildScopingQuery with path sessions", () => {
+    expect(buildScopingQuery("lkonga", "ocsearchv2", ["sessions"])).toBe(
+      "repo:lkonga/ocsearchv2 path:sessions",
+    )
+  })
+
+  test("filterResultsByPathPrefix keeps sessions only", () => {
+    const mk = (path: string): SearchResult => ({
+      chunk: { hash: "", text: "x", range: { start: 0, end: 0 }, line_range: { start: 1, end: 2 } },
+      distance: 0.1,
+      location: { path, commit_sha: "c", repo: { nwo: "lkonga/ocsearchv2", url: "" } },
+    })
+    const out = filterResultsByPathPrefix(
+      [mk("manifest.json"), mk("sessions/ses_a.md"), mk("scripts/x")],
+      ["sessions"],
+    )
+    expect(out.map((r) => r.location.path)).toEqual(["sessions/ses_a.md"])
   })
 })

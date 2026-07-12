@@ -462,6 +462,16 @@ async function ensureShadow(
   return { shadowOwner: login, shadowRepo: sname }
 }
 
+export function coerceStringArray(value: unknown): string[] | undefined {
+  if (value == null) return undefined
+  if (Array.isArray(value)) {
+    const out = value.map((x) => String(x).trim()).filter(Boolean)
+    return out.length ? out : undefined
+  }
+  if (typeof value === "string" && value.trim()) return [value.trim()]
+  return undefined
+}
+
 function normalizePathFilters(path?: string[]): string[] | undefined {
   if (!path?.length) return undefined
   const out = path
@@ -470,7 +480,16 @@ function normalizePathFilters(path?: string[]): string[] | undefined {
   return out.length ? out : undefined
 }
 
-function buildScopingQuery(owner: string, repo: string, path?: string[], lang?: string[]): string {
+export function filterResultsByPathPrefix(results: SearchResult[], paths: string[] | undefined): SearchResult[] {
+  const prefixes = normalizePathFilters(paths)
+  if (!prefixes?.length) return results
+  return results.filter((r) => {
+    const p = r.location.path
+    return prefixes.some((pref) => p === pref || p.startsWith(`${pref}/`))
+  })
+}
+
+export function buildScopingQuery(owner: string, repo: string, path?: string[], lang?: string[]): string {
   const parts = [`repo:${owner}/${repo}`]
   if (lang?.length) parts.push(...lang.map((item) => `lang:${item}`))
   const paths = normalizePathFilters(path)
@@ -478,7 +497,7 @@ function buildScopingQuery(owner: string, repo: string, path?: string[], lang?: 
   return parts.join(" ")
 }
 
-interface SearchResult {
+export interface SearchResult {
   chunk: { hash: string; text: string; range: { start: number; end: number }; line_range: { start: number; end: number } }
   distance: number
   location: { path: string; commit_sha: string; ref_name?: string; repo: { nwo: string; url: string } }
@@ -684,7 +703,16 @@ export const plugin: Plugin = async (_ctx) => {
             if (info.state !== "ready") throw new Error("Repository index not ready after polling. Try again shortly.")
           }
 
-          const results = await search(searchOwner, searchRepo, params.query, token, signal, params.path, params.lang, { maxResults, embeddingModel })
+          const pathFilters = coerceStringArray(params.path)
+          const langFilters = coerceStringArray(params.lang)
+          // When path whitelist is set: repo-only scoping + client prefix filter (path:/lang: in scoping_query 404s on some private repos).
+          const apiPath = pathFilters?.length ? undefined : pathFilters
+          const apiLang = pathFilters?.length ? undefined : langFilters
+          let results = await search(searchOwner, searchRepo, params.query, token, signal, apiPath, apiLang, {
+            maxResults,
+            embeddingModel,
+          })
+          results = filterResultsByPathPrefix(results, pathFilters)
           const deduped = dedupeAndFilter(results)
           const output = format(deduped, parsed.owner, parsed.repo, branch)
           const branchLabel = branch ? ` @ ${branch}` : ""
