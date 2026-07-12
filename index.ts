@@ -489,12 +489,9 @@ export function filterResultsByPathPrefix(results: SearchResult[], paths: string
   })
 }
 
-export function buildScopingQuery(owner: string, repo: string, path?: string[], lang?: string[]): string {
-  const parts = [`repo:${owner}/${repo}`]
-  if (lang?.length) parts.push(...lang.map((item) => `lang:${item}`))
-  const paths = normalizePathFilters(path)
-  if (paths?.length) parts.push(...paths.map((item) => `path:${item}`))
-  return parts.join(" ")
+/** Embeddings API accepts only `repo:owner/name`; path/lang/notPath in scoping_query 404 on private repos. */
+export function buildScopingQuery(_owner: string, _repo: string, _path?: string[], _lang?: string[]): string {
+  return `repo:${_owner}/${_repo}`
 }
 
 export interface SearchResult {

@@ -158,9 +158,10 @@ describe("githubrepo path whitelist helpers", () => {
     expect(coerceStringArray(undefined)).toBeUndefined()
   })
 
-  test("buildScopingQuery with path sessions", () => {
-    expect(buildScopingQuery("lkonga", "ocsearchv2", ["sessions"])).toBe(
-      "repo:lkonga/ocsearchv2 path:sessions",
+  test("buildScopingQuery is repo-only even when path/lang passed", () => {
+    expect(buildScopingQuery("lkonga", "ocsearchv2")).toBe("repo:lkonga/ocsearchv2")
+    expect(buildScopingQuery("lkonga", "ocsearchv2", ["sessions"], ["Markdown"])).toBe(
+      "repo:lkonga/ocsearchv2",
     )
   })
 
