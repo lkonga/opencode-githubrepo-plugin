@@ -1,0 +1,13 @@
+{
+  "name": "@lkonga/opencode-githubrepo-v2",
+  "version": "1.0.0",
+  "description": "OpenCode V2 plugin: semantic code search across GitHub repositories using Copilot embeddings (port of opencode-githubrepo)",
+  "private": true,
+  "type": "module",
+  "main": "./server.mjs",
+  "exports": {
+    ".": "./server.mjs",
+    "./server": "./server.mjs",
+    "./tui": "./tui.tsx"
+  }
+}
