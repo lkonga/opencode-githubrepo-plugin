@@ -1,6 +1,6 @@
 # opencode-githubrepo
 
-**v1.0.11** — OpenCode plugin for semantic code search across GitHub repositories using GitHub’s Copilot embeddings API (`api.github.com`). No fork patches, no CAPI proxy, no `opencode-patches` dependency.
+**v1.0.11** — Semantic code search across GitHub repositories using GitHub’s Copilot embeddings API (`api.github.com`). One package, three hosts: OpenCode plugin (`index.ts`) + OMP extension (`omp.ts`) + OMO extension (`omo.ts`). No fork patches, no CAPI proxy, no `opencode-patches` dependency.
 
 ## Quick start (anyone)
 
@@ -82,12 +82,81 @@ And to `tui.json` for the `/githubrepo` TUI command:
 }
 ```
 
+### MCP (stdio)
+
+Install the package and Bun, then configure your MCP host to launch the installed TypeScript entry point (replace the path with your installation location):
+
+```json
+{
+  "mcpServers": {
+    "repotool": {
+      "command": "bun",
+      "args": ["/path/to/node_modules/@lkonga/opencode-githubrepo/mcp-server.ts"]
+    }
+  }
+}
+```
+
+The server uses the authentication described above and exposes `repotool` and `repotool_global` (parameters: `discovery`, `query`, optional `path`). Path filters work; language filters are unsupported and rejected. Branch searches create shadow repositories and are rejected when `GITHUBREPO_BRANCH_SEARCH=false`.
+
+### OMP (oh-my-pi)
+
+Same package, second host (`omp.ts` reuses the `index.ts` pipeline via OMP `ExtensionAPI`; `index.ts`/`tui.ts` untouched, enabled via `omp.extensions` in `package.json`).
+
+```sh
+omp plugin link /path/to/opencode-githubrepo-plugin
+omp plugin list  # must show @lkonga/opencode-githubrepo
+```
+
+- Tool `githubrepo` with the same `repo`/`query`/`branch`/`path`/`lang` params.
+- Command `/githubrepo` shows settings + token presence (never token material). Status view only, no interactive editing yet.
+- Auth is identical: OpenCode `auth.json` Copilot OAuth plus `gh auth token` (`repo` scope for private repos); `GITHUBREPO_PREFER_GH=1` for private-heavy use.
+
+### OMO (omo / senpi)
+
+Same package, third host (`omo.ts` reuses the `index.ts` pipeline via the senpi `ExtensionAPI`; `index.ts`/`tui.ts`/`omp.ts` untouched, enabled via `pi.extensions` in `package.json`).
+
+```sh
+omo install /path/to/opencode-githubrepo-plugin
+omo list  # must show the installed package
+```
+
+- Tool `githubrepo` with the same `repo`/`query`/`branch`/`path`/`lang` params.
+- Command `/githubrepo` shows settings + token presence (never token material). Status view only, no interactive editing yet.
+- Auth is identical: OpenCode `auth.json` Copilot OAuth plus `gh auth token` (`repo` scope for private repos); `GITHUBREPO_PREFER_GH=1` for private-heavy use.
+- Host differences from `omp.ts`: senpi `ToolDefinition.parameters` is a TypeBox schema (not zod), and senpi `ExtensionAPI` has no `pi.zod`/`pi.logger`.
+
+### PI (pi-coding-agent)
+
+Same package, fourth host (`pi.ts` reuses the `index.ts` pipeline via the pi-coding-agent `ExtensionAPI`; `index.ts`/`tui.ts`/`omp.ts`/`omo.ts` untouched, enabled via `pi.extensions` in `package.json`).
+
+```sh
+# Install by linking the repo into ~/.pi/agent/extensions/
+ln -s /path/to/opencode-githubrepo-plugin ~/.pi/agent/extensions/opencode-githubrepo
+```
+
+- Tool `githubrepo` with the same `repo`/`query`/`branch`/`path`/`lang` params.
+- Command `/githubrepo` shows settings + token presence (never token material). Status view only, no interactive editing yet.
+- Auth is identical: OpenCode `auth.json` Copilot OAuth plus `gh auth token` (`repo` scope for private repos); `GITHUBREPO_PREFER_GH=1` for private-heavy use.
+
 ## Usage
 
 Ask the AI to search a GitHub repo:
 
 > "Search the facebook/react repo for reconciler fiber scheduling"
 > "Find how BusEvent is defined in the opencode repo"
+
+### CLI
+
+For bounded discovery and search, run `bun cli.ts --global "topic:testing language:TypeScript" "test runner"` (optionally add `--path src/`). The first query uses GitHub repository metadata search, not code search; the second is the semantic code query. `repotool_global` provides the same behavior over MCP. Discovery examines at most five candidates from one GitHub search page and searches their default branches sequentially using the existing Copilot index workflow, which may trigger indexing. It can include private repositories visible to the token. Results are not exhaustive or globally ranked; failures, incomplete discovery, and timeouts are reported as partial results. Discovery errors, including rate limits, fail the request; a possible rate limit during search stops further candidates. The overall search timeout also bounds indexing and all candidates. Metadata search requires a token with appropriate GitHub access as well as Copilot embeddings access.
+
+With Bun and the package dependencies installed, run `bun cli.ts --help` from the package directory. For example:
+
+```sh
+bun cli.ts --path src/ facebook/react "fiber scheduling"
+```
+
+The CLI searches the specified repository's default branch, not all of GitHub. It uses the same authentication and indexing as the plugin. Results go to stdout; errors go to stderr and return a nonzero exit status. `GITHUBREPO_SEARCH_TIMEOUT` sets the overall search timeout in milliseconds. Branch URLs are not supported by the CLI. The published package includes `cli.ts` and `skills/githubrepo/SKILL.md`; invoke the CLI with Bun from the installed package directory, and copy the skill directory into your agent's skills directory if desired.
 
 ## Tool parameters
 
@@ -97,7 +166,7 @@ Ask the AI to search a GitHub repo:
 | `query` | string | Semantic search query |
 | `branch` | string? | Non-default branch to search |
 | `path` | string[]? | Filter by file paths |
-| `lang` | string[]? | Filter by language |
+| `lang` | string[]? | Unsupported; non-empty values are rejected |
 
 ## Environment variables
 
@@ -106,6 +175,12 @@ Ask the AI to search a GitHub repo:
 | `GITHUBREPO_BRANCH_SEARCH` | `true` | Enable branch search via shadow repos |
 | `GITHUBREPO_BRANCH_TIMEOUT` | `180000` | ms to wait for branch indexing |
 | `GITHUBREPO_SHADOW_PREFIX` | `tmp-ghrtool` | Prefix for shadow repo names |
+| `GITHUBREPO_ALLOW_PRIVATE_SHADOW` | unset | Set exactly `true` to allow copying private or unknown-visibility sources into shadows |
+
+Private source branch search creates a separate, durable private repository containing the branch history. It persists after access to or deletion of the source, can retain sensitive history, and has its own access and retention settings; indexing also sends the copy to GitHub's indexing service. Enable this only with authorization, and delete the shadow and manage its retention separately when no longer needed.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `GITHUBREPO_MAX_RESULTS` | `64` | Max results returned |
 | `GITHUBREPO_POLL_DELAY_MS` | `1000` | Polling interval in ms |
 | `GITHUBREPO_AUTH_JSON` | — | Explicit path to OpenCode `auth.json` (supports `~/…`) |

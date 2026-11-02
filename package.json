@@ -4,8 +4,24 @@
   "description": "OpenCode plugin: semantic code search across GitHub repositories using Copilot embeddings",
   "type": "module",
   "main": "./index.ts",
+  "omp": {
+    "extensions": [
+      "./omp.ts"
+    ]
+  },
+  "pi": {
+    "extensions": [
+      "./pi.ts"
+    ]
+  },
   "files": [
     "index.ts",
+    "mcp-server.ts",
+    "cli.ts",
+    "skills/",
+    "omo.ts",
+    "omp.ts",
+    "pi.ts",
     "tui.ts",
     "README.md"
   ],
@@ -16,8 +32,16 @@
   "publishConfig": {
     "access": "public"
   },
+  "devDependencies": {
+    "@code-yeongyu/senpi": "2026.10.19",
+    "@oh-my-pi/pi-coding-agent": "^18.6.0",
+    "typebox": "^1.3.34"
+  },
+  "peerDependencies": {
+    "typebox": "*"
+  },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/server": "^2.4.0",
     "@opencode-ai/plugin": "*",
     "zod": "^4.3.6"
   }

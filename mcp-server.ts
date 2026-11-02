@@ -5,13 +5,15 @@
  *
  * Tool name: repotool (was githubrepo; use repotool only).
  */
-import { Server } from "@modelcontextprotocol/sdk/server/index.js"
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
+import { McpServer } from "@modelcontextprotocol/server"
+import { serveStdio } from "@modelcontextprotocol/server/stdio"
+import { z } from "zod/v4"
 import {
   getToken,
   parseRepo,
   checkIndex,
+  verifyShadowIndex,
+  verifyShadowResults,
   triggerIndex,
   waitForIndex,
   ensureShadow,
@@ -25,76 +27,32 @@ import {
   envMsOrCfgSeconds,
   readSearchConfig,
   POLL_DELAY,
+  globalSearch,
 } from "./index.ts"
 
 const DESCRIPTION = `Semantic code search across GitHub repositories using Copilot embeddings.
-Use owner/repo or a full GitHub URL. Optional branch/path/lang filters.
+Use owner/repo or a full GitHub URL. Optional branch and path filters; language filtering is unsupported.
 Formerly exposed as the githubrepo tool; prefer repotool.`
 
-const TOOL_NAME = "repotool"
+const server = new McpServer({ name: "repotool", version: "1.0.13" })
 
-const TOOL_INPUT_SCHEMA = {
-  type: "object",
-  properties: {
-    repo: {
-      type: "string",
-      description: "owner/repo or full GitHub URL (supports /tree/branch)",
-    },
-    query: { type: "string", description: "Semantic search query" },
-    branch: { type: "string", description: "Non-default branch (shadow-repo mode)" },
-    path: {
-      type: "array",
-      items: { type: "string" },
-      description: "Path filters e.g. ['src/']",
-    },
-    lang: {
-      type: "array",
-      items: { type: "string" },
-      description: "Language filters e.g. ['TypeScript']",
-    },
-  },
-  required: ["repo", "query"],
-} as const
-
-const server = new Server(
-  { name: "repotool", version: "1.0.13" },
-  { capabilities: { tools: {} } },
-)
-
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: TOOL_NAME,
-      description: DESCRIPTION,
-      inputSchema: TOOL_INPUT_SCHEMA,
-    },
-  ],
-}))
-
-server.setRequestHandler(CallToolRequestSchema, async (req) => {
-  if (req.params.name !== TOOL_NAME) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Unknown tool: ${req.params.name}. Use ${TOOL_NAME} (githubrepo was renamed).`,
-        },
-      ],
-      isError: true,
-    }
-  }
-  const params = (req.params.arguments ?? {}) as {
-    repo?: string
-    query?: string
-    branch?: string
-    path?: string[]
-    lang?: string[]
-  }
-  if (!params.repo || !params.query) {
-    return { content: [{ type: "text", text: "repo and query are required" }], isError: true }
-  }
-
+server.registerTool("repotool", {
+  description: DESCRIPTION,
+  inputSchema: z.object({
+    repo: z.string().min(1).describe("owner/repo or full GitHub URL (supports /tree/branch)"),
+    query: z.string().min(1).describe("Semantic search query"),
+    branch: z.string().optional().describe("Non-default branch (shadow-repo mode)"),
+    path: z.array(z.string()).optional().describe("Path filters e.g. ['src/']"),
+    lang: z.array(z.string()).optional().describe("Unsupported; omit this parameter"),
+  }),
+}, async (params, extra) => {
   try {
+    if (params.lang?.length) throw new Error("Language filtering is not supported.")
+    const parsed = parseRepo(params.repo)
+    if (!parsed) throw new Error(`Invalid repository format: "${params.repo}"`)
+    const branch = params.branch ?? parsed.branch
+    const branchSearch = (process.env.GITHUBREPO_BRANCH_SEARCH ?? "true") !== "false"
+    if (branch && !branchSearch) throw new Error("Branch search is disabled by GITHUBREPO_BRANCH_SEARCH.")
     const cfg = readSearchConfig()
     const searchTimeout = envMsOrCfgSeconds("GITHUBREPO_SEARCH_TIMEOUT", cfg.searchTimeout, 120000)
     const branchTimeout = envMsOrCfgSeconds("GITHUBREPO_BRANCH_TIMEOUT", cfg.branchTimeout, 180000)
@@ -102,8 +60,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const embeddingModel =
       process.env.GITHUBREPO_EMBEDDING_MODEL || cfg.embeddingModel || "metis-1024-I16-Binary"
     const pollAttemptsCfg = Number(process.env.GITHUBREPO_POLL_ATTEMPTS || cfg.pollAttempts) || 10
-    const branchSearch = (process.env.GITHUBREPO_BRANCH_SEARCH ?? "true") !== "false"
-    const signal = AbortSignal.timeout(searchTimeout)
+    const signal = AbortSignal.any([extra.signal, AbortSignal.timeout(searchTimeout)])
 
     const token = await getToken()
     if (!token) {
@@ -112,15 +69,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       )
     }
 
-    const parsed = parseRepo(params.repo)
-    if (!parsed) throw new Error(`Invalid repository format: "${params.repo}"`)
-
-    const branch = params.branch ?? parsed.branch
-    const needsBranch = !!branch && branchSearch
+    const needsBranch = !!branch
     const pollAttempts = needsBranch ? Math.ceil(branchTimeout / POLL_DELAY) : pollAttemptsCfg
 
     let searchOwner = parsed.owner
     let searchRepo = parsed.repo
+    let shadowSha: string | undefined
 
     if (needsBranch) {
       const login = await getAuthUser(token, signal)
@@ -136,9 +90,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       )
       searchOwner = shadow.shadowOwner
       searchRepo = shadow.shadowRepo
+      shadowSha = shadow.sourceSha
     }
 
     let info = await checkIndex(searchOwner, searchRepo, token, signal)
+    if (shadowSha) await verifyShadowIndex(info, shadowSha, searchOwner, searchRepo, token, signal)
+
     if (info.state === "error") {
       throw new Error(`Cannot access repository ${searchOwner}/${searchRepo}.`)
     }
@@ -172,6 +129,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       if (info.state !== "ready") throw new Error("Repository index not ready after polling.")
     }
 
+    if (shadowSha) await verifyShadowIndex(info, shadowSha, searchOwner, searchRepo, token, signal)
+
     const pathFilters = coerceStringArray(params.path)
     const langFilters = coerceStringArray(params.lang)
     const apiPath = pathFilters?.length ? undefined : pathFilters
@@ -180,9 +139,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       maxResults,
       embeddingModel,
     })
+    if (shadowSha) verifyShadowResults(results, shadowSha)
     results = filterResultsByPathPrefix(results, pathFilters)
     const deduped = dedupeAndFilter(results)
-    const output = format(deduped, parsed.owner, parsed.repo, branch)
+    const output = format(deduped, parsed.owner, parsed.repo, shadowSha ?? branch)
     return { content: [{ type: "text", text: output }] }
   } catch (err) {
     if (isAbortError(err)) {
@@ -193,5 +153,25 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 })
 
-const transport = new StdioServerTransport()
-await server.connect(transport)
+server.registerTool("repotool_global", {
+  description: "Discover up to five repositories by GitHub metadata and search their default branches semantically. Results are not exhaustive.",
+  inputSchema: z.object({
+    discovery: z.string().min(1).describe("GitHub repository metadata search query"),
+    query: z.string().min(1).describe("Semantic code search query"),
+    path: z.array(z.string()).optional().describe("Path prefixes"),
+  }),
+}, async (params, extra) => {
+  try {
+    const cfg = readSearchConfig()
+    const signal = AbortSignal.any([extra.signal, AbortSignal.timeout(envMsOrCfgSeconds("GITHUBREPO_SEARCH_TIMEOUT", cfg.searchTimeout, 120000))])
+    signal.throwIfAborted()
+    const token = await getToken()
+    signal.throwIfAborted()
+    if (!token) throw new Error("Not authenticated. Run `opencode auth login` or `gh auth login`.")
+    return { content: [{ type: "text", text: await globalSearch(params.discovery, params.query, token, signal, params.path) }] }
+  } catch (err) {
+    return { content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }], isError: true }
+  }
+})
+
+await serveStdio(() => server)
