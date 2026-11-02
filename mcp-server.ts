@@ -5,9 +5,9 @@
  *
  * Tool name: repotool (was githubrepo; use repotool only).
  */
-import { Server } from "@modelcontextprotocol/sdk/server/index.js"
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
+import { McpServer } from "@modelcontextprotocol/server"
+import { serveStdio } from "@modelcontextprotocol/server/stdio"
+import { z } from "zod/v4"
 import {
   getToken,
   parseRepo,
@@ -28,73 +28,28 @@ import {
 } from "./index.ts"
 
 const DESCRIPTION = `Semantic code search across GitHub repositories using Copilot embeddings.
-Use owner/repo or a full GitHub URL. Optional branch/path/lang filters.
+Use owner/repo or a full GitHub URL. Optional branch and path filters; language filtering is unsupported.
 Formerly exposed as the githubrepo tool; prefer repotool.`
 
-const TOOL_NAME = "repotool"
+const server = new McpServer({ name: "repotool", version: "1.0.11" })
 
-const TOOL_INPUT_SCHEMA = {
-  type: "object",
-  properties: {
-    repo: {
-      type: "string",
-      description: "owner/repo or full GitHub URL (supports /tree/branch)",
-    },
-    query: { type: "string", description: "Semantic search query" },
-    branch: { type: "string", description: "Non-default branch (shadow-repo mode)" },
-    path: {
-      type: "array",
-      items: { type: "string" },
-      description: "Path filters e.g. ['src/']",
-    },
-    lang: {
-      type: "array",
-      items: { type: "string" },
-      description: "Language filters e.g. ['TypeScript']",
-    },
-  },
-  required: ["repo", "query"],
-} as const
-
-const server = new Server(
-  { name: "repotool", version: "1.0.13" },
-  { capabilities: { tools: {} } },
-)
-
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: TOOL_NAME,
-      description: DESCRIPTION,
-      inputSchema: TOOL_INPUT_SCHEMA,
-    },
-  ],
-}))
-
-server.setRequestHandler(CallToolRequestSchema, async (req) => {
-  if (req.params.name !== TOOL_NAME) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Unknown tool: ${req.params.name}. Use ${TOOL_NAME} (githubrepo was renamed).`,
-        },
-      ],
-      isError: true,
-    }
-  }
-  const params = (req.params.arguments ?? {}) as {
-    repo?: string
-    query?: string
-    branch?: string
-    path?: string[]
-    lang?: string[]
-  }
-  if (!params.repo || !params.query) {
-    return { content: [{ type: "text", text: "repo and query are required" }], isError: true }
-  }
-
+server.registerTool("repotool", {
+  description: DESCRIPTION,
+  inputSchema: z.object({
+    repo: z.string().min(1).describe("owner/repo or full GitHub URL (supports /tree/branch)"),
+    query: z.string().min(1).describe("Semantic search query"),
+    branch: z.string().optional().describe("Non-default branch (shadow-repo mode)"),
+    path: z.array(z.string()).optional().describe("Path filters e.g. ['src/']"),
+    lang: z.array(z.string()).optional().describe("Unsupported; omit this parameter"),
+  }),
+}, async (params, extra) => {
   try {
+    if (params.lang?.length) throw new Error("Language filtering is not supported.")
+    const parsed = parseRepo(params.repo)
+    if (!parsed) throw new Error(`Invalid repository format: "${params.repo}"`)
+    const branch = params.branch ?? parsed.branch
+    const branchSearch = (process.env.GITHUBREPO_BRANCH_SEARCH ?? "true") !== "false"
+    if (branch && !branchSearch) throw new Error("Branch search is disabled by GITHUBREPO_BRANCH_SEARCH.")
     const cfg = readSearchConfig()
     const searchTimeout = envMsOrCfgSeconds("GITHUBREPO_SEARCH_TIMEOUT", cfg.searchTimeout, 120000)
     const branchTimeout = envMsOrCfgSeconds("GITHUBREPO_BRANCH_TIMEOUT", cfg.branchTimeout, 180000)
@@ -102,8 +57,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const embeddingModel =
       process.env.GITHUBREPO_EMBEDDING_MODEL || cfg.embeddingModel || "metis-1024-I16-Binary"
     const pollAttemptsCfg = Number(process.env.GITHUBREPO_POLL_ATTEMPTS || cfg.pollAttempts) || 10
-    const branchSearch = (process.env.GITHUBREPO_BRANCH_SEARCH ?? "true") !== "false"
-    const signal = AbortSignal.timeout(searchTimeout)
+    const signal = AbortSignal.any([extra.signal, AbortSignal.timeout(searchTimeout)])
 
     const token = await getToken()
     if (!token) {
@@ -112,11 +66,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       )
     }
 
-    const parsed = parseRepo(params.repo)
-    if (!parsed) throw new Error(`Invalid repository format: "${params.repo}"`)
-
-    const branch = params.branch ?? parsed.branch
-    const needsBranch = !!branch && branchSearch
+    const needsBranch = !!branch
     const pollAttempts = needsBranch ? Math.ceil(branchTimeout / POLL_DELAY) : pollAttemptsCfg
 
     let searchOwner = parsed.owner
@@ -193,5 +143,4 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 })
 
-const transport = new StdioServerTransport()
-await server.connect(transport)
+await serveStdio(() => server)
