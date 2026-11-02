@@ -1,6 +1,10 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
-import { execSync } from "child_process"
+import { execSync, execFile } from "child_process"
+import { promisify } from "util"
+import { createHash } from "crypto"
+import { mkdtemp, rm } from "fs/promises"
+import { tmpdir } from "os"
 import { readFileSync } from "fs"
 import { join } from "path"
 import { homedir } from "os"
@@ -120,14 +124,10 @@ Usage notes:
 Branch search (non-default branches):
   - Omit branch when searching the repository default branch. Passing the default branch
     still triggers shadow-repo mode and is slower/error-prone.
-  - The embeddings API only indexes the default branch. To search other branches, the tool
-    creates persistent shadow repos under your account named tmp-ghrtool-{repo}-{branch}.
+  - The embeddings API only indexes the default branch. Branch search creates a persistent,
+    private managed shadow repository and pushes the selected branch history using git and gh.
   - Set the branch parameter or include /tree/branch-name in the URL
-  - Self-owned repos: creates a private shadow repo via GitHub import API
-  - Other repos: forks under shadow name, sets target branch as default
-  - Shadow repos are persistent — reused on subsequent searches (no re-creation overhead)
-  - First search on a new branch is slower (~15-60s for indexing)
-  - To clean up shadow repos: delete repos matching tmp-ghrtool-* from your account
+  - Shadows are reused and synchronized; indexing may take time. Verify provenance before manual cleanup.
   - Disable with GITHUBREPO_BRANCH_SEARCH=false
 
 Filtering:
@@ -325,6 +325,12 @@ export async function triggerIndex(owner: string, repo: string, token: string, s
   return response.ok
 }
 
+export async function verifyShadowIndex(info: IndexInfo, sha: string, owner: string, repo: string, token: string, signal: AbortSignal): Promise<void> {
+  if (info.state !== "ready" || info.sha === sha) return
+  if (!await triggerIndex(owner, repo, token, signal)) throw new Error(`Failed to trigger indexing for ${owner}/${repo}.`)
+  throw new Error(info.sha ? "Shadow index is stale; indexing requested. Retry later." : "Cannot verify shadow index SHA; indexing requested. Retry later.")
+}
+
 export async function waitForIndex(owner: string, repo: string, token: string, signal: AbortSignal, attempts: number): Promise<IndexInfo> {
   for (let i = 0; i < attempts; i++) {
     await sleep(POLL_DELAY, signal)
@@ -335,16 +341,6 @@ export async function waitForIndex(owner: string, repo: string, token: string, s
   return { state: "building" }
 }
 
-async function waitForReindex(owner: string, repo: string, oldSha: string, token: string, signal: AbortSignal, attempts: number): Promise<IndexInfo> {
-  await triggerIndex(owner, repo, token, signal)
-  for (let i = 0; i < attempts; i++) {
-    await sleep(POLL_DELAY, signal)
-    const info = await checkIndex(owner, repo, token, signal)
-    if (info.state === "ready" && info.sha && info.sha !== oldSha) return info
-    if (info.state === "error") return info
-  }
-  return { state: "building" }
-}
 
 export async function getAuthUser(token: string, signal: AbortSignal): Promise<string | undefined> {
   const res = await ghFetch(`${API}/user`, { headers: hdrs(token), signal })
@@ -353,114 +349,91 @@ export async function getAuthUser(token: string, signal: AbortSignal): Promise<s
   return data.login
 }
 
-async function setDefaultBranch(owner: string, repo: string, branch: string, token: string, signal: AbortSignal): Promise<boolean> {
-  const res = await ghFetch(`${API}/repos/${owner}/${repo}`, {
-    method: "PATCH",
-    headers: hdrs(token),
-    body: JSON.stringify({ default_branch: branch }),
-    signal,
-  })
-  return res.ok
-}
-
-function shadowName(repo: string, branch: string): string {
-  const sanitized = branch.replace(/[^a-zA-Z0-9_.-]/g, "-").replace(/-+/g, "-").slice(0, 60)
-  return `${SHADOW_PREFIX}-${repo}-${sanitized}`
-}
-
-async function createFork(owner: string, repo: string, forkName: string, token: string, signal: AbortSignal): Promise<boolean> {
-  const res = await ghFetch(`${API}/repos/${owner}/${repo}/forks`, {
-    method: "POST",
-    headers: hdrs(token),
-    body: JSON.stringify({ name: forkName, default_branch_only: false }),
-    signal,
-  })
-  if (!res.ok) return false
-  const login = (await getAuthUser(token, signal))!
-  for (let i = 0; i < 30; i++) {
-    await sleep(2000, signal)
-    const c = await ghFetch(`${API}/repos/${login}/${forkName}`, { headers: hdrs(token), signal })
-    if (c.ok) return true
-  }
-  return false
-}
-
-async function deleteShadow(owner: string, repo: string, token: string) {
-  try {
-    await ghFetch(`${API}/repos/${owner}/${repo}`, { method: "DELETE", headers: hdrs(token) })
-  } catch { /* best-effort */ }
-}
+const runGit = promisify(execFile)
+const SHADOW_BRANCH = "githubrepo-shadow"
 
 export async function ensureShadow(
   login: string, owner: string, repo: string, branch: string, token: string, signal: AbortSignal,
   onStatus: (msg: string) => void,
-): Promise<{ shadowOwner: string; shadowRepo: string }> {
-  const sname = shadowName(repo, branch)
-  const exists = await ghFetch(`${API}/repos/${login}/${sname}`, { headers: hdrs(token), signal })
-
-  if (exists.ok) {
-    const data = await exists.json()
-    if (data.default_branch !== branch) {
-      onStatus(`Updating shadow ${sname} default branch to "${branch}"...`)
-      await setDefaultBranch(login, sname, branch, token, signal)
-      const info = await checkIndex(login, sname, token, signal)
-      if (info.sha) {
-        onStatus(`Re-indexing shadow for branch "${branch}"...`)
-        await waitForReindex(login, sname, info.sha, token, signal, Math.ceil(BRANCH_TIMEOUT / POLL_DELAY))
+): Promise<{ shadowOwner: string; shadowRepo: string; sourceSha: string }> {
+  if (![login, owner, repo].every(v => /^[a-zA-Z0-9_.-]+$/.test(v)) || !branch || branch.startsWith("-") || branch.includes("\0")) {
+    throw new Error("Invalid repository or branch name.")
+  }
+  const sourceUrl = `${API}/repos/${owner}/${repo}`
+  const source = await ghFetch(sourceUrl, { headers: hdrs(token), signal })
+  if (!source.ok) throw new Error(`Cannot access source repository (${source.status}).`)
+  const sourceData = await source.json()
+  if (!Number.isSafeInteger(sourceData.id)) throw new Error("Source repository has no stable identity.")
+  if (sourceData.private !== false && process.env.GITHUBREPO_ALLOW_PRIVATE_SHADOW !== "true") {
+    throw new Error("Private or unknown-visibility source requires GITHUBREPO_ALLOW_PRIVATE_SHADOW=true; shadow copies persist independently of the source.")
+  }
+  const identity = JSON.stringify([sourceData.id, branch])
+  const hash = createHash("sha256").update(identity).digest("hex")
+  const prefix = SHADOW_PREFIX.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 40) || "tmp-ghrtool"
+  const sname = `${prefix}-${hash}`
+  const marker = `githubrepo-shadow-v1:${hash}`
+  const shadowUrl = `${API}/repos/${login}/${sname}`
+  const branchUrl = `${sourceUrl}/git/ref/heads/${branch.split("/").map(encodeURIComponent).join("/")}`
+  const getSourceSha = async () => {
+    const res = await ghFetch(branchUrl, { headers: hdrs(token), signal })
+    if (!res.ok) throw new Error(`Cannot resolve source branch (${res.status}).`)
+    const sha = (await res.json()).object?.sha
+    if (typeof sha !== "string" || !/^[0-9a-f]{40}$/.test(sha)) throw new Error("Invalid source commit SHA.")
+    return sha as string
+  }
+  const sha = await getSourceSha()
+  let shadow = await ghFetch(shadowUrl, { headers: hdrs(token), signal })
+  if (shadow.status === 404) {
+    onStatus(`Creating private shadow ${sname}...`)
+    const created = await ghFetch(`${API}/user/repos`, {
+      method: "POST", headers: hdrs(token), signal,
+      body: JSON.stringify({ name: sname, private: true, description: marker, auto_init: false }),
+    })
+    if (!created.ok) throw new Error(`Cannot create shadow repository (${created.status}); no repository was modified.`)
+    shadow = await ghFetch(shadowUrl, { headers: hdrs(token), signal })
+  }
+  if (!shadow.ok) throw new Error(`Cannot inspect shadow repository (${shadow.status}).`)
+  const data = await shadow.json()
+  if (data.private !== true || data.description !== marker || data.owner?.login?.toLowerCase() !== login.toLowerCase() || data.fork === true) {
+    throw new Error(`Shadow name collision or invalid provenance for ${login}/${sname}; refusing to modify it.`)
+  }
+  const refUrl = `${shadowUrl}/git/ref/heads/${SHADOW_BRANCH}`
+  const ref = await ghFetch(refUrl, { headers: hdrs(token), signal })
+  if (!ref.ok && ref.status !== 404 && ref.status !== 409) throw new Error(`Cannot inspect shadow ref (${ref.status}).`)
+  const oldSha = ref.ok ? (await ref.json()).object?.sha : ""
+  if (ref.ok && (typeof oldSha !== "string" || !/^[0-9a-f]{40}$/.test(oldSha))) throw new Error("Invalid shadow ref SHA.")
+  if (oldSha !== sha) {
+    onStatus(`Synchronizing private shadow ${sname}...`)
+    const dir = await mkdtemp(join(tmpdir(), "githubrepo-"))
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_") && !key.startsWith("GH_")))
+    Object.assign(env, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", GH_PROMPT_DISABLED: "1", GH_HOST: "github.com", GH_TOKEN: token })
+    const git = async (...args: string[]) => {
+      try {
+        return await runGit("git", ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential", "-c", "http.followRedirects=false", ...args], { cwd: dir, env, signal, maxBuffer: 1024 * 1024 })
+      } catch (err) {
+        if (isAbortError(err, signal)) throw err
+        throw new Error("Git shadow synchronization failed. Ensure git and gh are installed and gh is authenticated with repository access.")
       }
     }
-    return { shadowOwner: login, shadowRepo: sname }
-  }
-
-  const selfOwned = login.toLowerCase() === owner.toLowerCase()
-  if (selfOwned) {
-    onStatus(`Creating shadow ${sname} from ${owner}/${repo}:${branch}...`)
-    const createRes = await ghFetch(`${API}/user/repos`, {
-      method: "POST",
-      headers: hdrs(token),
-      body: JSON.stringify({
-        name: sname,
-        private: true,
-        description: `Shadow repo for ${owner}/${repo} branch ${branch} (githubrepo tool)`,
-        auto_init: false,
-      }),
-      signal,
-    })
-    if (!createRes.ok) {
-      const body = await createRes.text()
-      throw new Error(`Failed to create shadow repo ${sname}: ${body}`)
+    try {
+      await git("init", "--bare", ".")
+      await git("fetch", "--no-tags", `https://github.com/${owner}/${repo}.git`, `refs/heads/${branch}:refs/heads/source`)
+      const fetched = (await git("rev-parse", "refs/heads/source")).stdout.trim()
+      if (fetched !== sha) throw new Error("Source branch changed during synchronization; retry.")
+      await git("push", `--force-with-lease=refs/heads/${SHADOW_BRANCH}:${oldSha}`, `https://github.com/${login}/${sname}.git`, `refs/heads/source:refs/heads/${SHADOW_BRANCH}`)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
     }
-
-    onStatus(`Importing ${owner}/${repo}:${branch} into shadow repo...`)
-    const importRes = await ghFetch(`${API}/repos/${login}/${sname}/import`, {
-      method: "PUT",
-      headers: { ...hdrs(token), Accept: "application/vnd.github.barred-rock-preview" },
-      body: JSON.stringify({ vcs: "git", vcs_url: `https://github.com/${owner}/${repo}.git` }),
-      signal,
-    })
-
-    if (importRes.ok) {
-      for (let i = 0; i < 60; i++) {
-        await sleep(3000, signal)
-        const statusRes = await ghFetch(`${API}/repos/${login}/${sname}/import`, { headers: hdrs(token), signal })
-        if (!statusRes.ok) break
-        const statusData = await statusRes.json()
-        if (statusData.status === "complete") break
-        if (statusData.status === "error") throw new Error(`Import failed: ${statusData.status_text}`)
-      }
-      await setDefaultBranch(login, sname, branch, token, signal)
-    } else {
-      await deleteShadow(login, sname, token)
-      throw new Error(`Cannot create shadow repo for self-owned repo. GitHub import API returned ${importRes.status}.`)
-    }
-  } else {
-    onStatus(`Forking ${owner}/${repo} as ${sname}...`)
-    const created = await createFork(owner, repo, sname, token, signal)
-    if (!created) throw new Error(`Failed to create shadow fork ${sname}.`)
-    await setDefaultBranch(login, sname, branch, token, signal)
   }
-
-  return { shadowOwner: login, shadowRepo: sname }
+  const verified = await ghFetch(refUrl, { headers: hdrs(token), signal })
+  if (!verified.ok || (await verified.json()).object?.sha !== sha || await getSourceSha() !== sha) throw new Error("Shadow or source branch changed during synchronization; retry.")
+  if (data.default_branch !== SHADOW_BRANCH) {
+    const updated = await ghFetch(shadowUrl, { method: "PATCH", headers: hdrs(token), signal, body: JSON.stringify({ default_branch: SHADOW_BRANCH }) })
+    if (!updated.ok) throw new Error(`Cannot set shadow default branch (${updated.status}).`)
+  }
+  const info = await checkIndex(login, sname, token, signal)
+  await verifyShadowIndex(info, sha, login, sname, token, signal)
+  return { shadowOwner: login, shadowRepo: sname, sourceSha: sha }
 }
 
 export function coerceStringArray(value: unknown): string[] | undefined {
@@ -629,7 +602,7 @@ export const plugin: Plugin = async (_ctx) => {
           ),
           query: tool.schema.string().describe("Semantic search query to find relevant code"),
           branch: tool.schema.string().describe(
-            "Search a non-default branch. Creates a persistent shadow repo (tmp-ghrtool-{repo}-{branch}) for indexing. Disable with GITHUBREPO_BRANCH_SEARCH=false"
+            "Search a non-default branch. Creates a persistent shadow repo (tmp-ghrtool-{hash}) for indexing. Disable with GITHUBREPO_BRANCH_SEARCH=false"
           ).optional(),
           path: tool.schema.array(tool.schema.string()).describe(
             "Filter by file paths, e.g. ['src/', 'README.md']"
@@ -668,6 +641,7 @@ export const plugin: Plugin = async (_ctx) => {
 
           let searchOwner = parsed.owner
           let searchRepo = parsed.repo
+          let shadowSha: string | undefined
 
           if (needsBranch) {
             const login = await getAuthUser(token, signal)
@@ -675,6 +649,7 @@ export const plugin: Plugin = async (_ctx) => {
             const shadow = await ensureShadow(login, parsed.owner, parsed.repo, branch!, token, signal, (msg) => ctx.metadata({ title: msg }))
             searchOwner = shadow.shadowOwner
             searchRepo = shadow.shadowRepo
+            shadowSha = shadow.sourceSha
           }
 
           let info: IndexInfo
@@ -684,6 +659,8 @@ export const plugin: Plugin = async (_ctx) => {
             if (isAbortError(err, signal)) return "Search was aborted. Try again with a more specific query."
             throw err
           }
+
+          if (shadowSha) await verifyShadowIndex(info, shadowSha, searchOwner, searchRepo, token, signal)
 
           if (info.state === "error") {
             throw new Error(`Cannot access repository ${searchOwner}/${searchRepo}. It may not exist or you may lack access.`)

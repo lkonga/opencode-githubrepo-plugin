@@ -12,6 +12,7 @@ import {
   getToken,
   parseRepo,
   checkIndex,
+  verifyShadowIndex,
   triggerIndex,
   waitForIndex,
   ensureShadow,
@@ -123,6 +124,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
     let searchOwner = parsed.owner
     let searchRepo = parsed.repo
+    let shadowSha: string | undefined
 
     if (needsBranch) {
       const login = await getAuthUser(token, signal)
@@ -138,9 +140,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       )
       searchOwner = shadow.shadowOwner
       searchRepo = shadow.shadowRepo
+      shadowSha = shadow.sourceSha
     }
 
     let info = await checkIndex(searchOwner, searchRepo, token, signal)
+    if (shadowSha) await verifyShadowIndex(info, shadowSha, searchOwner, searchRepo, token, signal)
+
     if (info.state === "error") {
       throw new Error(`Cannot access repository ${searchOwner}/${searchRepo}.`)
     }

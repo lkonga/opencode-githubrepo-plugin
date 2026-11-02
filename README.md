@@ -146,6 +146,12 @@ Ask the AI to search a GitHub repo:
 | `GITHUBREPO_BRANCH_SEARCH` | `true` | Enable branch search via shadow repos |
 | `GITHUBREPO_BRANCH_TIMEOUT` | `180000` | ms to wait for branch indexing |
 | `GITHUBREPO_SHADOW_PREFIX` | `tmp-ghrtool` | Prefix for shadow repo names |
+| `GITHUBREPO_ALLOW_PRIVATE_SHADOW` | unset | Set exactly `true` to allow copying private or unknown-visibility sources into shadows |
+
+Private source branch search creates a separate, durable private repository containing the branch history. It persists after access to or deletion of the source, can retain sensitive history, and has its own access and retention settings; indexing also sends the copy to GitHub's indexing service. Enable this only with authorization, and delete the shadow and manage its retention separately when no longer needed.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `GITHUBREPO_MAX_RESULTS` | `64` | Max results returned |
 | `GITHUBREPO_POLL_DELAY_MS` | `1000` | Polling interval in ms |
 | `GITHUBREPO_AUTH_JSON` | — | Explicit path to OpenCode `auth.json` (supports `~/…`) |

@@ -11,6 +11,7 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import {
   POLL_DELAY,
   checkIndex,
+  verifyShadowIndex,
   coerceStringArray,
   dedupeAndFilter,
   ensureShadow,
@@ -55,7 +56,7 @@ export default function githubrepoOmpExtension(pi: ExtensionAPI) {
       branch: z
         .string()
         .describe(
-          "Search a non-default branch. Creates a persistent shadow repo (tmp-ghrtool-{repo}-{branch}) for indexing. Disable with GITHUBREPO_BRANCH_SEARCH=false",
+          "Search a non-default branch. Creates a persistent shadow repo (tmp-ghrtool-{hash}) for indexing. Disable with GITHUBREPO_BRANCH_SEARCH=false",
         )
         .optional(),
       path: z.array(z.string()).describe("Filter by file paths, e.g. ['src/', 'README.md']").optional(),
@@ -93,6 +94,7 @@ export default function githubrepoOmpExtension(pi: ExtensionAPI) {
 
         let searchOwner = parsed.owner;
         let searchRepo = parsed.repo;
+        let shadowSha: string | undefined;
 
         if (needsBranch) {
           const login = await getAuthUser(token, combined);
@@ -102,12 +104,15 @@ export default function githubrepoOmpExtension(pi: ExtensionAPI) {
           );
           searchOwner = shadow.shadowOwner;
           searchRepo = shadow.shadowRepo;
+          shadowSha = shadow.sourceSha;
         }
 
         let info = await checkIndex(searchOwner, searchRepo, token, combined).catch((err) => {
           if (isAbortError(err, combined)) throw err;
           throw err;
         });
+
+        if (shadowSha) await verifyShadowIndex(info, shadowSha, searchOwner, searchRepo, token, combined);
 
         if (info.state === "error") {
           throw new Error(`Cannot access repository ${searchOwner}/${searchRepo}. It may not exist or you may lack access.`);
