@@ -10,7 +10,8 @@ import { homedir } from "os"
 const API = "https://api.github.com"
 const MAX_RESULTS = Number(process.env.GITHUBREPO_MAX_RESULTS) || 64
 const EMBEDDING_MODEL = process.env.GITHUBREPO_EMBEDDING_MODEL ?? "metis-1024-I16-Binary"
-const MAX_QUERY_BYTES = Number(process.env.GITHUBREPO_MAX_QUERY_BYTES) || 7800
+const configuredMaxQueryBytes = Number(process.env.GITHUBREPO_MAX_QUERY_BYTES)
+const MAX_QUERY_BYTES = Number.isSafeInteger(configuredMaxQueryBytes) && configuredMaxQueryBytes > 0 ? configuredMaxQueryBytes : 7800
 const POLL_ATTEMPTS = Number(process.env.GITHUBREPO_POLL_ATTEMPTS) || 10
 export const POLL_DELAY = Number(process.env.GITHUBREPO_POLL_DELAY_MS) || 1000
 const API_VERSION = process.env.GITHUBREPO_API_VERSION ?? "2022-11-28"
@@ -131,7 +132,7 @@ Branch search (non-default branches):
 
 Filtering:
   - Use path parameter to filter by file paths: ["src/", "README.md"]
-  - Use lang parameter to filter by language: ["TypeScript", "Python"]
+  - Language filtering is not supported; omit lang.
 
 Examples:
   - Basic: { "repo": "facebook/react", "query": "reconciler fiber scheduling" }
@@ -139,7 +140,7 @@ Examples:
   - Branch via URL: { "repo": "https://github.com/owner/repo/tree/feature-x", "query": "new api" }
   - Branch via param: { "repo": "owner/repo", "query": "search term", "branch": "develop" }
   - Search 3 branches: call 3 times with branch "main", "staging", "feature-x"
-  - With filters: { "repo": "owner/repo", "query": "error handling", "path": ["src/"], "lang": ["TypeScript"] }
+  - With filters: { "repo": "owner/repo", "query": "error handling", "path": ["src/"] }
 
 Environment variables:
   - GITHUBREPO_AUTH_JSON: explicit path to OpenCode auth.json (overrides auto-discovery)
@@ -540,11 +541,13 @@ async function searchOnce(
 }
 
 export async function search(owner: string, repo: string, query: string, token: string, signal: AbortSignal, path?: string[], lang?: string[], opts?: { maxResults?: number; embeddingModel?: string }): Promise<SearchResult[]> {
-  const encoder = new TextEncoder()
-  let trimmed = query
-  while (encoder.encode(trimmed).length > MAX_QUERY_BYTES) {
-    trimmed = trimmed.slice(0, -100)
+  if (coerceStringArray(lang)) throw new Error("Language filtering is not supported by the embeddings API. Omit lang.")
+  const bytes = new TextEncoder().encode(query)
+  let end = Math.min(bytes.length, MAX_QUERY_BYTES)
+  if (end < bytes.length) {
+    while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--
   }
+  const trimmed = new TextDecoder().decode(bytes.subarray(0, end))
 
   let attempt = await searchOnce(owner, repo, trimmed, token, signal, path, lang, opts)
   if (
@@ -632,7 +635,7 @@ export const plugin: Plugin = async (_ctx) => {
             "Filter by file paths, e.g. ['src/', 'README.md']"
           ).optional(),
           lang: tool.schema.array(tool.schema.string()).describe(
-            "Filter by language, e.g. ['TypeScript', 'Python']"
+            "Unsupported; omit this parameter"
           ).optional(),
         },
         async execute(params, ctx) {
@@ -647,6 +650,8 @@ export const plugin: Plugin = async (_ctx) => {
 
           const signal = AbortSignal.any([ctx.abort, AbortSignal.timeout(searchTimeout)])
           try {
+            if ((params.branch ?? parseRepo(params.repo)?.branch) && !branchSearch) throw new Error("Branch search is disabled by GITHUBREPO_BRANCH_SEARCH=false.")
+            if (coerceStringArray(params.lang)) throw new Error("Language filtering is not supported by the embeddings API. Omit lang.")
             const token = await getToken()
           if (!token) {
             throw new Error(

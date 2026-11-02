@@ -8,6 +8,8 @@ import {
   isEmbeddingsScopeDenied,
   pickPrimaryToken,
   pickScopeFallback,
+  search,
+  plugin,
 } from "./index"
 import type { SearchResult } from "./index"
 import type { CopilotTokens } from "./index"
@@ -79,6 +81,43 @@ describe("githubrepo safety source guards", () => {
     expect(src).toContain("pickScopeFallback")
     // scope-404 retry is bidirectional (not hardcoded to gh)
     expect(src).toContain("pickScopeFallback(token, resolveCopilotTokens())")
+  })
+})
+
+describe("search input safety", () => {
+  test("rejects unsupported language filters before network", async () => {
+    await expect(search("o", "r", "q", "token", new AbortController().signal, ["src"], ["TypeScript"])).rejects.toThrow("Language filtering is not supported")
+  })
+
+  test("truncates UTF-8 without splitting a character", async () => {
+    const original = globalThis.fetch
+    let prompt = ""
+    globalThis.fetch = (async (_url, init) => {
+      prompt = JSON.parse(String(init?.body)).prompt
+      return Response.json({ results: [] })
+    }) as typeof fetch
+    try {
+      await search("o", "r", "a".repeat(7799) + "😀" + "z", "token", new AbortController().signal)
+      expect(prompt).toBe("a".repeat(7799))
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  test("OpenCode rejects disabled explicit and URL branches and lang before auth", async () => {
+    const previous = process.env.GITHUBREPO_BRANCH_SEARCH
+    process.env.GITHUBREPO_BRANCH_SEARCH = "false"
+    try {
+      const tool = (await plugin({} as any)).tool!.githubrepo
+      const ctx = { abort: new AbortController().signal, metadata: () => {} } as any
+      for (const repo of ["o/r", "https://github.com/o/r/tree/dev"]) {
+        await expect(tool.execute({ repo, query: "q", ...(repo === "o/r" ? { branch: "dev" } : {}) }, ctx)).rejects.toThrow("Branch search is disabled")
+      }
+      await expect(tool.execute({ repo: "o/r", query: "q", lang: ["Python"] }, ctx)).rejects.toThrow("Language filtering is not supported")
+    } finally {
+      if (previous === undefined) delete process.env.GITHUBREPO_BRANCH_SEARCH
+      else process.env.GITHUBREPO_BRANCH_SEARCH = previous
+    }
   })
 })
 

@@ -28,7 +28,7 @@ import {
 } from "./index.ts"
 
 const DESCRIPTION = `Semantic code search across GitHub repositories using Copilot embeddings.
-Use owner/repo or a full GitHub URL. Optional branch/path/lang filters.
+Use owner/repo or a full GitHub URL. Optional branch/path filters; lang is unsupported.
 Formerly exposed as the githubrepo tool; prefer repotool.`
 
 const TOOL_NAME = "repotool"
@@ -50,7 +50,7 @@ const TOOL_INPUT_SCHEMA = {
     lang: {
       type: "array",
       items: { type: "string" },
-      description: "Language filters e.g. ['TypeScript']",
+      description: "Unsupported; omit this parameter",
     },
   },
   required: ["repo", "query"],
@@ -105,6 +105,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const branchSearch = (process.env.GITHUBREPO_BRANCH_SEARCH ?? "true") !== "false"
     const signal = AbortSignal.timeout(searchTimeout)
 
+    if ((params.branch ?? parseRepo(params.repo)?.branch) && !branchSearch) throw new Error("Branch search is disabled by GITHUBREPO_BRANCH_SEARCH=false.")
+    if (coerceStringArray(params.lang)) throw new Error("Language filtering is not supported by the embeddings API. Omit lang.")
     const token = await getToken()
     if (!token) {
       throw new Error(

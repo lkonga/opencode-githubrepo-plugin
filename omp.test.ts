@@ -63,3 +63,20 @@ describe("omp extension registration", () => {
     )
   })
 })
+
+
+test("rejects disabled branch and unsupported language before auth", async () => {
+  const previous = process.env.GITHUBREPO_BRANCH_SEARCH
+  process.env.GITHUBREPO_BRANCH_SEARCH = "false"
+  try {
+    const { pi, tools } = stubPi()
+    githubrepoOmpExtension(pi)
+    const execute = (params: any) => tools.get("githubrepo").execute("id", params, undefined, undefined, {})
+    await expect(execute({ repo: "o/r", query: "q", branch: "dev" })).rejects.toThrow("Branch search is disabled")
+    await expect(execute({ repo: "https://github.com/o/r/tree/dev", query: "q" })).rejects.toThrow("Branch search is disabled")
+    await expect(execute({ repo: "o/r", query: "q", path: ["src"], lang: ["Python"] })).rejects.toThrow("Language filtering is not supported")
+  } finally {
+    if (previous === undefined) delete process.env.GITHUBREPO_BRANCH_SEARCH
+    else process.env.GITHUBREPO_BRANCH_SEARCH = previous
+  }
+})

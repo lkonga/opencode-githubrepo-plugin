@@ -29,7 +29,7 @@ import {
 } from "./index.ts";
 
 const DESCRIPTION = `Semantic code search across GitHub repositories using Copilot embeddings.
-Use owner/repo or a full GitHub URL. Optional branch/path/lang filters.`;
+Use owner/repo or a full GitHub URL. Optional branch/path filters; lang is unsupported.`;
 
 /** Decoded tool p. `Static<TParams>` over the omptype-backed `pi.zod`
  *  infers `unknown` outside the omp repo, so annotate once here. Runtime
@@ -59,7 +59,7 @@ export default function githubrepoOmpExtension(pi: ExtensionAPI) {
         )
         .optional(),
       path: z.array(z.string()).describe("Filter by file paths, e.g. ['src/', 'README.md']").optional(),
-      lang: z.array(z.string()).describe("Filter by language, e.g. ['TypeScript']").optional(),
+      lang: z.array(z.string()).describe("Unsupported; omit this parameter").optional(),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
       const p = params as GithubrepoParams;
@@ -75,6 +75,8 @@ export default function githubrepoOmpExtension(pi: ExtensionAPI) {
       const timeoutSignal = AbortSignal.timeout(searchTimeout);
       const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
       try {
+        if ((p.branch ?? parseRepo(p.repo)?.branch) && !branchSearch) throw new Error("Branch search is disabled by GITHUBREPO_BRANCH_SEARCH=false.");
+        if (coerceStringArray(p.lang)) throw new Error("Language filtering is not supported by the embeddings API. Omit lang.");
         const token = await getToken();
         if (!token) {
           throw new Error(

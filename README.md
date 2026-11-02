@@ -137,7 +137,7 @@ Ask the AI to search a GitHub repo:
 | `query` | string | Semantic search query |
 | `branch` | string? | Non-default branch to search |
 | `path` | string[]? | Filter by file paths |
-| `lang` | string[]? | Filter by language |
+| `lang` | string[]? | Unsupported; non-empty values are rejected |
 
 ## Environment variables
 

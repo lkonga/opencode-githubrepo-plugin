@@ -36,7 +36,7 @@ import {
 } from "./index.ts";
 
 const DESCRIPTION = `Semantic code search across GitHub repositories using Copilot embeddings.
-Use owner/repo or a full GitHub URL. Optional branch/path/lang filters.`;
+Use owner/repo or a full GitHub URL. Optional branch/path filters; lang is unsupported.`;
 
 /** Params are untyped (`unknown`) at the senpi boundary until validated, so
  *  annotate once here. Runtime validation happens in the omo host before
@@ -68,7 +68,7 @@ const PARAMS_SCHEMA = Type.Object({
   ),
   lang: Type.Optional(
     Type.Array(Type.String(), {
-      description: "Filter by language, e.g. ['TypeScript']",
+      description: "Unsupported; omit this parameter",
     }),
   ),
 });
@@ -94,6 +94,8 @@ export default function githubrepoOmoExtension(pi: ExtensionAPI) {
       const timeoutSignal = AbortSignal.timeout(searchTimeout);
       const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
       try {
+        if ((p.branch ?? parseRepo(p.repo)?.branch) && !branchSearch) throw new Error("Branch search is disabled by GITHUBREPO_BRANCH_SEARCH=false.");
+        if (coerceStringArray(p.lang)) throw new Error("Language filtering is not supported by the embeddings API. Omit lang.");
         const token = await getToken();
         if (!token) {
           throw new Error(
