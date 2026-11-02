@@ -19,6 +19,7 @@ import {
   POLL_DELAY,
   checkIndex,
   verifyShadowIndex,
+  verifyShadowResults,
   coerceStringArray,
   dedupeAndFilter,
   ensureShadow,
@@ -170,6 +171,8 @@ export default function githubrepoOmoExtension(pi: ExtensionAPI) {
           if (info.state !== "ready") throw new Error("Repository index not ready after polling. Try again shortly.");
         }
 
+        if (shadowSha) await verifyShadowIndex(info, shadowSha, searchOwner, searchRepo, token, combined);
+
         const pathFilters = coerceStringArray(p.path);
         const langFilters = coerceStringArray(p.lang);
         // Repo-only scoping + client prefix filter (path:/lang: in scoping_query 404s on some private repos).
@@ -179,9 +182,10 @@ export default function githubrepoOmoExtension(pi: ExtensionAPI) {
           maxResults,
           embeddingModel,
         });
+        if (shadowSha) verifyShadowResults(results, shadowSha);
         results = filterResultsByPathPrefix(results, pathFilters);
         const deduped = dedupeAndFilter(results);
-        const output = format(deduped, parsed.owner, parsed.repo, branch);
+        const output = format(deduped, parsed.owner, parsed.repo, shadowSha ?? branch);
         const branchLabel = branch ? ` @ ${branch}` : "";
         const suffix = deduped.length === 1 ? " result" : " results";
         const title =

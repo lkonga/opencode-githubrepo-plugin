@@ -16,6 +16,9 @@
   },
   "files": [
     "index.ts",
+    "mcp-server.ts",
+    "cli.ts",
+    "skills/",
     "omo.ts",
     "omp.ts",
     "pi.ts",
@@ -38,7 +41,7 @@
     "typebox": "*"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/server": "^2.4.0",
     "@opencode-ai/plugin": "*",
     "zod": "^4.3.6"
   }

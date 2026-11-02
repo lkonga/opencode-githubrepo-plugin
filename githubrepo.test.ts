@@ -4,6 +4,7 @@ import { tmpdir } from "os"
 import { join } from "path"
 import { resolve } from "path"
 import {
+  globalSearch,
   buildScopingQuery,
   coerceStringArray,
   filterResultsByPathPrefix,
@@ -14,6 +15,8 @@ import {
   plugin,
   ensureShadow,
   verifyShadowIndex,
+  verifyShadowResults,
+  format,
 } from "./index"
 import type { SearchResult } from "./index"
 import type { CopilotTokens } from "./index"
@@ -22,12 +25,13 @@ const PLUGIN = resolve(import.meta.dir, "index.ts")
 
 describe("managed shadows", () => {
   const sha = "a".repeat(40)
-  async function exercise(options: { collision?: boolean; stale?: boolean; sourceStatus?: number; branch?: string; id?: number; shadowStatus?: number; private?: boolean | null; index404?: boolean; triggerFails?: boolean; synchronize?: boolean } = {}) {
+  async function exercise(options: { gitLogin?: string; collision?: boolean; stale?: boolean; sourceStatus?: number; branch?: string; id?: number; shadowStatus?: number; private?: boolean | null; index404?: boolean; triggerFails?: boolean; synchronize?: boolean } = {}) {
     const original = globalThis.fetch
-    const calls: { url: string; method: string; body?: any }[] = []
+    const calls: { url: string; method: string; body?: any; authorization?: string }[] = []
     globalThis.fetch = (async (input, init) => {
       const url = String(input), method = init?.method ?? "GET"
-      calls.push({ url, method, body: init?.body && JSON.parse(String(init.body)) })
+      calls.push({ url, method, body: init?.body && JSON.parse(String(init.body)), authorization: new Headers(init?.headers).get('authorization') ?? undefined })
+      if (url.endsWith('/user')) return Response.json({ login: options.gitLogin ?? 'me' })
       if (url.endsWith("/repos/source/project")) return options.sourceStatus ? new Response("", { status: options.sourceStatus }) : Response.json({ id: options.id ?? 7, private: options.private === null ? undefined : options.private ?? false })
       if (url.includes("/repos/source/project/git/ref/heads/")) return Response.json({ object: { sha } })
       if (url.endsWith("/embeddings_index")) return method === "POST" ? (options.triggerFails ? new Response("", { status: 403 }) : Response.json({})) : options.index404 ? new Response("", { status: 404 }) : Response.json({ semantic_code_search_ok: true, semantic_commit_sha: options.stale ? "b".repeat(40) : sha })
@@ -78,7 +82,14 @@ describe("managed shadows", () => {
   test("every search entrypoint requires the exact shadow SHA", () => {
     for (const file of ["index.ts", "mcp-server.ts", "omo.ts", "omp.ts", "pi.ts"]) {
       const src = readFileSync(resolve(import.meta.dir, file), "utf8")
-      expect(src).toMatch(/if \(shadowSha\) await verifyShadowIndex\(info, shadowSha, searchOwner, searchRepo, token, (signal|combined)\)/)
+      const lastPoll = src.lastIndexOf("info = await waitForIndex(searchOwner, searchRepo")
+      const verification = src.indexOf("if (shadowSha) await verifyShadowIndex(info, shadowSha, searchOwner, searchRepo, token,", lastPoll)
+      const searchCall = src.indexOf("await search(searchOwner, searchRepo", lastPoll)
+      expect(lastPoll).toBeGreaterThan(-1)
+      expect(verification).toBeGreaterThan(lastPoll)
+      expect(searchCall).toBeGreaterThan(verification)
+      expect(src.indexOf('verifyShadowResults(results, shadowSha)', searchCall)).toBeGreaterThan(searchCall)
+      expect(src).toContain('format(deduped, parsed.owner, parsed.repo, shadowSha ?? branch)')
     }
   })
   test("rejects unverifiable shadow index even when 404 permits normal search", async () => {
@@ -108,25 +119,40 @@ describe("managed shadows", () => {
       expect(posts).toBe(2)
     } finally { globalThis.fetch = original }
   })
-  test("git receives the selected token only through its environment", async () => {
+  test("rejects mismatched or missing result SHAs and pins links", () => {
+    const result = { location: { commit_sha: sha, path: 'a.ts' }, chunk: { line_range: { start: 1, end: 2 }, text: 'code' }, distance: 0 } as SearchResult
+    verifyShadowResults([result], sha)
+    expect(format([result], 'source', 'project', sha)).toContain(`/blob/${sha}/a.ts`)
+    for (const commit_sha of ['b'.repeat(40), undefined]) {
+      expect(() => verifyShadowResults([{ ...result, location: { ...result.location, commit_sha } } as SearchResult], sha)).toThrow('unverified commit')
+    }
+  })
+  test("git receives the gh token only through its environment", async () => {
     const dir = mkdtempSync(join(tmpdir(), "githubrepo-test-"))
     const oldPath = process.env.PATH, oldGh = process.env.GH_TOKEN, oldTrace = process.env.GIT_TRACE
     const log = join(dir, "log")
     try {
       writeFileSync(join(dir, "git"), `#!/bin/sh\nprintf '%s|%s|%s\\n' "$GH_TOKEN" "$GIT_TRACE" "$*" >> '${log}'\ncase "$*" in *rev-parse*) printf '${sha}\\n';; esac\n`)
       chmodSync(join(dir, "git"), 0o700)
+      writeFileSync(join(dir, "gh"), "#!/bin/sh\nprintf 'git-token\\n'\n")
+      chmodSync(join(dir, "gh"), 0o700)
       process.env.PATH = `${dir}:${oldPath}`
       process.env.GH_TOKEN = "wrong-token"
       process.env.GIT_TRACE = "1"
       const result = await exercise({ synchronize: true })
       expect(result.result?.sourceSha).toBe(sha)
+      expect(result.calls.find(c => c.url.endsWith('/user'))?.authorization).toBe('Bearer git-token')
+      expect(result.calls.filter(c => !c.url.endsWith('/user')).every(c => c.authorization === 'Bearer secret')).toBe(true)
+      const mismatch = await exercise({ synchronize: true, gitLogin: 'other' })
+      expect(mismatch.error).toContain('identity does not match')
       const lines = readFileSync(log, "utf8").trim().split("\n")
       expect(lines.length).toBe(4)
       for (const line of lines) {
         const [token, trace, args] = line.split("|")
-        expect(token).toBe("secret")
+        expect(token).toBe("git-token")
         expect(trace).toBe("")
         expect(args).not.toContain("secret")
+        expect(args).not.toContain("git-token")
         expect(args).not.toContain("wrong-token")
       }
     } finally {
@@ -141,6 +167,109 @@ describe("managed shadows", () => {
     expect(result.error).toContain("stale")
     expect(result.calls.some(c => c.method === "POST" && c.url.endsWith("/embeddings_index"))).toBe(true)
   })
+})
+
+test("global discovery is bounded and reports per-repository failures", async () => {
+  const original = globalThis.fetch
+  const calls: string[] = []
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input)
+    calls.push(url)
+    if (url.includes('/search/repositories')) {
+      expect(new URL(url).searchParams.get('per_page')).toBe('5')
+      return Response.json({ incomplete_results: true, items: ['a/one', 'b/two', 'c/three', 'd/four', 'e/five', 'f/six'].map(full_name => ({ full_name })) })
+    }
+    if (url.includes('embeddings_index')) return Response.json({ semantic_code_search_ok: true, semantic_commit_sha: 'sha' })
+    if (url.includes('/embeddings/code/search')) {
+      const body = JSON.parse(String(init?.body))
+      if (body.scoping_query.includes('b/two')) return new Response('unavailable', { status: 500 })
+      return Response.json({ results: [{ chunk: { hash: 'h', text: 'matched code', range: { start: 0, end: 1 }, line_range: { start: 1, end: 2 } }, distance: 0.1, location: { path: 'src/file.ts', commit_sha: 'sha', repo: { nwo: 'a/one', url: '' } } }] })
+    }
+    throw new Error(`Unexpected request ${url}`)
+  }) as typeof fetch
+  try {
+    const output = await globalSearch('topic:test', 'query', 'token', new AbortController().signal)
+    expect(output).toContain('GitHub reported incomplete discovery')
+    expect(output).toContain('### a/one\n## Result 1')
+    expect(output).toContain('matched code')
+    expect(output).toContain('### b/two\nSearch failed:')
+    expect(output).toContain('Searched 4 of 5 candidates successfully; results are partial')
+    expect(calls.some(url => url.includes('f/six'))).toBe(false)
+    expect(calls.filter(url => url.includes('/embeddings/code/search'))).toHaveLength(5)
+  } finally { globalThis.fetch = original }
+})
+
+test("global discovery reports rate limits", async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = (async () => new Response('', { status: 429 })) as typeof fetch
+  try {
+    await expect(globalSearch('test', 'query', 'token', new AbortController().signal)).rejects.toThrow('429')
+  } finally { globalThis.fetch = original }
+})
+
+test("global discovery skips malformed names and marks partial results", async () => {
+  const original = globalThis.fetch
+  const calls: string[] = []
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input); calls.push(url)
+    if (url.includes('/search/repositories')) return Response.json({ items: [null, { full_name: 'https://github.com/a/b' }, { full_name: 'a/..' }, { full_name: 'a/b?x' }, { full_name: 'good/repo' }] })
+    if (url.includes('embeddings_index')) return Response.json({ semantic_code_search_ok: true, semantic_commit_sha: 'sha' })
+    return Response.json({ results: [] })
+  }) as typeof fetch
+  try {
+    const output = await globalSearch('test', 'query', 'token', new AbortController().signal)
+    expect(output).toContain('skipped 4 malformed')
+    expect(output).toContain('Searched 1 of 1 candidates successfully; results are partial')
+    expect(calls.filter(url => url.includes('embeddings_index'))).toHaveLength(1)
+  } finally { globalThis.fetch = original }
+})
+
+test.each(['check', 'trigger', 'poll', 'search'])('global search stops on %s rate limit retaining prior results', async (stage) => {
+  const original = globalThis.fetch
+  const calls: string[] = []
+  let checks = 0
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input); calls.push(url)
+    if (url.includes('/search/repositories')) return Response.json({ items: ['a/one', 'b/two', 'c/three'].map(full_name => ({ full_name })) })
+    if (url.includes('/repos/a/')) return Response.json({ semantic_code_search_ok: true, semantic_commit_sha: 'sha' })
+    if (url.includes('/repos/b/')) {
+      if (init?.method === 'POST') return stage === 'trigger' ? new Response('rate limit', { status: 403 }) : new Response('', { status: 200 })
+      checks++
+      if (stage === 'check' || (stage === 'poll' && checks > 1)) return new Response('', { status: 429 })
+      if (stage === 'trigger' || stage === 'poll') return Response.json({})
+      return Response.json({ semantic_code_search_ok: true, semantic_commit_sha: 'sha' })
+    }
+    if (url.includes('/embeddings/code/search')) {
+      const body = JSON.parse(String(init?.body))
+      if (stage === 'search' && body.scoping_query.includes('b/two')) return new Response('', { status: 403, headers: { 'x-ratelimit-remaining': '0' } })
+      return Response.json({ results: [] })
+    }
+    throw new Error(`Unexpected request ${url}`)
+  }) as typeof fetch
+  try {
+    const output = await globalSearch('test', 'query', 'token', new AbortController().signal)
+    expect(output).toContain('### a/one')
+    expect(output).toContain('stopped after a rate limit')
+    expect(output).toContain('Searched 1 of 3 candidates successfully; results are partial')
+    expect(calls.some(url => url.includes('/repos/c/'))).toBe(false)
+  } finally { globalThis.fetch = original }
+})
+
+test('global search continues after a non-rate-limit 403', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input)
+    if (url.includes('/search/repositories')) return Response.json({ items: ['a/one', 'b/two'].map(full_name => ({ full_name })) })
+    if (url.includes('/repos/a/')) return new Response('forbidden', { status: 403 })
+    if (url.includes('embeddings_index')) return Response.json({ semantic_code_search_ok: true, semantic_commit_sha: 'sha' })
+    return Response.json({ results: [] })
+  }) as typeof fetch
+  try {
+    const output = await globalSearch('test', 'query', 'token', new AbortController().signal)
+    expect(output).toContain('index (403)')
+    expect(output).toContain('### b/two')
+    expect(output).toContain('Searched 1 of 2 candidates successfully; results are partial')
+  } finally { globalThis.fetch = original }
 })
 
 describe("githubrepo safety source guards", () => {
