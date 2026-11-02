@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { readFileSync } from "fs"
 import { resolve } from "path"
 import {
+  globalSearch,
   buildScopingQuery,
   coerceStringArray,
   filterResultsByPathPrefix,
@@ -13,6 +14,109 @@ import type { SearchResult } from "./index"
 import type { CopilotTokens } from "./index"
 
 const PLUGIN = resolve(import.meta.dir, "index.ts")
+
+test("global discovery is bounded and reports per-repository failures", async () => {
+  const original = globalThis.fetch
+  const calls: string[] = []
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input)
+    calls.push(url)
+    if (url.includes('/search/repositories')) {
+      expect(new URL(url).searchParams.get('per_page')).toBe('5')
+      return Response.json({ incomplete_results: true, items: ['a/one', 'b/two', 'c/three', 'd/four', 'e/five', 'f/six'].map(full_name => ({ full_name })) })
+    }
+    if (url.includes('embeddings_index')) return Response.json({ semantic_code_search_ok: true, semantic_commit_sha: 'sha' })
+    if (url.includes('/embeddings/code/search')) {
+      const body = JSON.parse(String(init?.body))
+      if (body.scoping_query.includes('b/two')) return new Response('unavailable', { status: 500 })
+      return Response.json({ results: [{ chunk: { hash: 'h', text: 'matched code', range: { start: 0, end: 1 }, line_range: { start: 1, end: 2 } }, distance: 0.1, location: { path: 'src/file.ts', commit_sha: 'sha', repo: { nwo: 'a/one', url: '' } } }] })
+    }
+    throw new Error(`Unexpected request ${url}`)
+  }) as typeof fetch
+  try {
+    const output = await globalSearch('topic:test', 'query', 'token', new AbortController().signal)
+    expect(output).toContain('GitHub reported incomplete discovery')
+    expect(output).toContain('### a/one\n## Result 1')
+    expect(output).toContain('matched code')
+    expect(output).toContain('### b/two\nSearch failed:')
+    expect(output).toContain('Searched 4 of 5 candidates successfully; results are partial')
+    expect(calls.some(url => url.includes('f/six'))).toBe(false)
+    expect(calls.filter(url => url.includes('/embeddings/code/search'))).toHaveLength(5)
+  } finally { globalThis.fetch = original }
+})
+
+test("global discovery reports rate limits", async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = (async () => new Response('', { status: 429 })) as typeof fetch
+  try {
+    await expect(globalSearch('test', 'query', 'token', new AbortController().signal)).rejects.toThrow('429')
+  } finally { globalThis.fetch = original }
+})
+
+test("global discovery skips malformed names and marks partial results", async () => {
+  const original = globalThis.fetch
+  const calls: string[] = []
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input); calls.push(url)
+    if (url.includes('/search/repositories')) return Response.json({ items: [null, { full_name: 'https://github.com/a/b' }, { full_name: 'a/..' }, { full_name: 'a/b?x' }, { full_name: 'good/repo' }] })
+    if (url.includes('embeddings_index')) return Response.json({ semantic_code_search_ok: true, semantic_commit_sha: 'sha' })
+    return Response.json({ results: [] })
+  }) as typeof fetch
+  try {
+    const output = await globalSearch('test', 'query', 'token', new AbortController().signal)
+    expect(output).toContain('skipped 4 malformed')
+    expect(output).toContain('Searched 1 of 1 candidates successfully; results are partial')
+    expect(calls.filter(url => url.includes('embeddings_index'))).toHaveLength(1)
+  } finally { globalThis.fetch = original }
+})
+
+test.each(['check', 'trigger', 'poll', 'search'])('global search stops on %s rate limit retaining prior results', async (stage) => {
+  const original = globalThis.fetch
+  const calls: string[] = []
+  let checks = 0
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input); calls.push(url)
+    if (url.includes('/search/repositories')) return Response.json({ items: ['a/one', 'b/two', 'c/three'].map(full_name => ({ full_name })) })
+    if (url.includes('/repos/a/')) return Response.json({ semantic_code_search_ok: true, semantic_commit_sha: 'sha' })
+    if (url.includes('/repos/b/')) {
+      if (init?.method === 'POST') return stage === 'trigger' ? new Response('rate limit', { status: 403 }) : new Response('', { status: 200 })
+      checks++
+      if (stage === 'check' || (stage === 'poll' && checks > 1)) return new Response('', { status: 429 })
+      if (stage === 'trigger' || stage === 'poll') return Response.json({})
+      return Response.json({ semantic_code_search_ok: true, semantic_commit_sha: 'sha' })
+    }
+    if (url.includes('/embeddings/code/search')) {
+      const body = JSON.parse(String(init?.body))
+      if (stage === 'search' && body.scoping_query.includes('b/two')) return new Response('', { status: 403, headers: { 'x-ratelimit-remaining': '0' } })
+      return Response.json({ results: [] })
+    }
+    throw new Error(`Unexpected request ${url}`)
+  }) as typeof fetch
+  try {
+    const output = await globalSearch('test', 'query', 'token', new AbortController().signal)
+    expect(output).toContain('### a/one')
+    expect(output).toContain('stopped after a rate limit')
+    expect(output).toContain('Searched 1 of 3 candidates successfully; results are partial')
+    expect(calls.some(url => url.includes('/repos/c/'))).toBe(false)
+  } finally { globalThis.fetch = original }
+})
+
+test('global search continues after a non-rate-limit 403', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input)
+    if (url.includes('/search/repositories')) return Response.json({ items: ['a/one', 'b/two'].map(full_name => ({ full_name })) })
+    if (url.includes('/repos/a/')) return new Response('forbidden', { status: 403 })
+    if (url.includes('embeddings_index')) return Response.json({ semantic_code_search_ok: true, semantic_commit_sha: 'sha' })
+    return Response.json({ results: [] })
+  }) as typeof fetch
+  try {
+    const output = await globalSearch('test', 'query', 'token', new AbortController().signal)
+    expect(output).toContain('index (403)')
+    expect(output).toContain('### b/two')
+    expect(output).toContain('Searched 1 of 2 candidates successfully; results are partial')
+  } finally { globalThis.fetch = original }
+})
 
 describe("githubrepo safety source guards", () => {
   test("githubrepo has a ghFetch wrapper", () => {

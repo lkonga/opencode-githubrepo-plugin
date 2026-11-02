@@ -293,6 +293,13 @@ export async function getToken(): Promise<string | undefined> {
 interface IndexInfo {
   state: "ready" | "building" | "not-indexed" | "error"
   sha?: string
+  status?: number
+}
+
+class RateLimitError extends Error {}
+
+function isRateLimit(status: number, text: string, headers: Headers): boolean {
+  return status === 429 || (status === 403 && (headers.get("x-ratelimit-remaining") === "0" || /rate limit/i.test(text)))
 }
 
 export async function checkIndex(owner: string, repo: string, token: string, signal: AbortSignal): Promise<IndexInfo> {
@@ -306,7 +313,9 @@ export async function checkIndex(owner: string, repo: string, token: string, sig
     if (response.status === 404) {
       return { state: "ready" }
     }
-    return { state: "error" }
+    const text = await response.text()
+    if (isRateLimit(response.status, text, response.headers)) throw new RateLimitError(`Index check failed (${response.status}): ${text}`)
+    return { state: "error", status: response.status }
   }
   const data = await response.json()
   if (data.semantic_code_search_ok && data.semantic_commit_sha) return { state: "ready", sha: data.semantic_commit_sha }
@@ -314,13 +323,18 @@ export async function checkIndex(owner: string, repo: string, token: string, sig
   return { state: "not-indexed" }
 }
 
-export async function triggerIndex(owner: string, repo: string, token: string, signal: AbortSignal): Promise<boolean> {
+export async function triggerIndex(owner: string, repo: string, token: string, signal: AbortSignal, detailedErrors = false): Promise<boolean> {
   const response = await ghFetch(`${API}/repos/${owner}/${repo}/copilot_internal/embeddings_index`, {
     method: "POST",
     headers: hdrs(token),
     body: JSON.stringify({ auto: false }),
     signal,
   })
+  if (!response.ok) {
+    const text = await response.text()
+    if (isRateLimit(response.status, text, response.headers)) throw new RateLimitError(`Index trigger failed (${response.status}): ${text}`)
+    if (detailedErrors) throw new Error(`Index trigger failed (${response.status}): ${text}`)
+  }
   return response.ok
 }
 
@@ -532,7 +546,9 @@ async function searchOnce(
   })
 
   if (!response.ok) {
-    return { ok: false, status: response.status, text: await response.text() }
+    const text = await response.text()
+    if (isRateLimit(response.status, text, response.headers)) throw new RateLimitError(`Search failed (${response.status}): ${text}`)
+    return { ok: false, status: response.status, text }
   }
 
   const data = await response.json()
@@ -611,6 +627,58 @@ export function format(results: SearchResult[], owner: string, repo: string, bra
       ].join("\n")
     })
     .join("\n\n")
+}
+
+// Discovery is intentionally a single bounded GitHub metadata search page.
+export async function globalSearch(discovery: string, query: string, token: string, signal: AbortSignal, paths?: string[]): Promise<string> {
+  if (!discovery.trim() || !query.trim()) throw new Error("Discovery and semantic queries must not be empty.")
+  if (paths?.some(path => !path.trim())) throw new Error("Path prefixes must not be empty.")
+  const params = new URLSearchParams({ q: discovery, per_page: "5" })
+  const response = await ghFetch(`${API}/search/repositories?${params}`, { headers: hdrs(token), signal })
+  if (!response.ok) throw new Error(`Repository discovery failed (${response.status}). Check authentication, query, or GitHub rate limits.`)
+  const data = await response.json()
+  if (!Array.isArray(data.items)) throw new Error("Invalid repository discovery response.")
+  const candidates: string[] = []
+  let malformed = 0
+  for (const item of data.items.slice(0, 5)) {
+    const name = item?.full_name
+    if (typeof name !== "string" || !/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?\/(?!\.{1,2}$)[a-zA-Z0-9._-]{1,100}$/.test(name)) {
+      malformed++
+      continue
+    }
+    if (!candidates.some(candidate => candidate.toLowerCase() === name.toLowerCase())) candidates.push(name)
+  }
+  const cfg = readSearchConfig()
+  const sections = [`GitHub metadata discovery returned ${candidates.length} candidates (maximum 5); results are not exhaustive${data.incomplete_results ? "; GitHub reported incomplete discovery" : ""}.`]
+  if (malformed) sections.push(`Partial results: skipped ${malformed} malformed discovery item(s).`)
+  let completed = 0
+  for (const name of candidates) {
+    if (signal.aborted) { sections.push(`Partial results: search stopped before ${name}.`); break }
+    const { owner, repo } = parseRepo(name)!
+    try {
+      let info = await checkIndex(owner, repo, token, signal)
+      if (info.state === "error") throw new Error(`Cannot access repository or index (${info.status}).`)
+      if (info.state === "not-indexed" && !await triggerIndex(owner, repo, token, signal, true)) throw new Error("Failed to trigger indexing.")
+      if (info.state === "building" || info.state === "not-indexed") {
+        info = await waitForIndex(owner, repo, token, signal, Number(process.env.GITHUBREPO_POLL_ATTEMPTS || cfg.pollAttempts) || 10)
+        if (info.state === "error") throw new Error(`Index check failed while polling (${info.status}).`)
+        if (info.state !== "ready") throw new Error("Index not ready after polling.")
+      }
+      const results = await search(owner, repo, query, token, signal, undefined, undefined, {
+        maxResults: Number(process.env.GITHUBREPO_MAX_RESULTS || cfg.maxResults) || 64,
+        embeddingModel: process.env.GITHUBREPO_EMBEDDING_MODEL || cfg.embeddingModel || "metis-1024-I16-Binary",
+      })
+      sections.push(`### ${name}\n${format(dedupeAndFilter(filterResultsByPathPrefix(results, paths)), owner, repo)}`)
+      completed++
+    } catch (err) {
+      if (signal.aborted) { sections.push(`Partial results: search stopped during ${name}.`); break }
+      const message = err instanceof Error ? err.message : String(err)
+      sections.push(`### ${name}\nSearch failed: ${message}`)
+      if (err instanceof RateLimitError) { sections.push("Partial results: stopped after a rate limit."); break }
+    }
+  }
+  sections.push(`Searched ${completed} of ${candidates.length} candidates successfully${completed < candidates.length || malformed || data.incomplete_results ? "; results are partial" : ""}.`)
+  return sections.join("\n\n")
 }
 
 // ─── Plugin export ────────────────────────────────────────────────────────────

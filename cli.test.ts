@@ -20,6 +20,20 @@ describe("CLI", () => {
     expect(result.stdout).toBe("")
     expect(result.stderr).not.toBe("")
   })
+  test("global mode forwards metadata and semantic queries", async () => {
+    const script = `
+      import { mock } from 'bun:test';
+      mock.module('./index.ts', () => ({ readSearchConfig: () => ({}), envMsOrCfgSeconds: () => 1000,
+        getToken: async () => 'token', globalSearch: async (...args) => JSON.stringify([args[0], args[1], args[4]]),
+        parseRepo: () => {}, checkIndex: () => {}, triggerIndex: () => {}, waitForIndex: () => {}, search: () => {},
+        dedupeAndFilter: () => {}, filterResultsByPathPrefix: () => {}, format: () => {}, isAbortError: () => false }));
+      const { run } = await import('./cli.ts');
+      console.log(await run(['--global', '--path', 'src/', 'topic:testing', 'find tests'], new AbortController().signal));
+    `
+    const child = Bun.spawn([process.execPath, "-e", script], { cwd: import.meta.dir, stdout: "pipe", stderr: "pipe" })
+    expect(await new Response(child.stdout).text()).toBe('["topic:testing","find tests",["src/"]]\n')
+    expect(await child.exited).toBe(0)
+  })
   test("rejects an already aborted search", async () => {
     const { run } = await import("./cli.ts")
     const controller = new AbortController()
@@ -38,7 +52,7 @@ describe("CLI", () => {
         },
         filterResultsByPathPrefix: (results, paths) => results.filter(x => x.startsWith(paths[0])),
         dedupeAndFilter: x => x, format: x => x.join(','), readSearchConfig: () => ({}),
-        envMsOrCfgSeconds: () => 1000, isAbortError: () => false,
+        envMsOrCfgSeconds: () => 1000, isAbortError: () => false, globalSearch: () => {},
       }));
       const { run } = await import('./cli.ts');
       console.log(await run(['--path', 'src/', 'o/r', 'query'], new AbortController().signal));

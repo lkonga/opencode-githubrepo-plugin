@@ -27,7 +27,7 @@ test("MCP stdio initializes, lists tools, and rejects invalid calls", async () =
     expect(init.result.serverInfo.name).toBe("repotool")
     proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n")
     const list = await request(2, "tools/list", {})
-    expect(list.result.tools.map((tool: { name: string }) => tool.name)).toEqual(["repotool"])
+    expect(list.result.tools.map((tool: { name: string }) => tool.name)).toEqual(["repotool", "repotool_global"])
     const missing = await request(3, "tools/call", { name: "repotool", arguments: { repo: "owner/repo" } })
     expect(missing.result?.isError || missing.error).toBeTruthy()
     const wrongType = await request(6, "tools/call", { name: "repotool", arguments: { repo: 42, query: "test" } })

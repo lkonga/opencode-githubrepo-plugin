@@ -97,7 +97,7 @@ Install the package and Bun, then configure your MCP host to launch the installe
 }
 ```
 
-The server uses the authentication described above and exposes `repotool`. Path filters work; language filters are unsupported and rejected. Branch searches create shadow repositories and are rejected when `GITHUBREPO_BRANCH_SEARCH=false`.
+The server uses the authentication described above and exposes `repotool` and `repotool_global` (parameters: `discovery`, `query`, optional `path`). Path filters work; language filters are unsupported and rejected. Branch searches create shadow repositories and are rejected when `GITHUBREPO_BRANCH_SEARCH=false`.
 
 ### OMP (oh-my-pi)
 
@@ -147,6 +147,8 @@ Ask the AI to search a GitHub repo:
 > "Find how BusEvent is defined in the opencode repo"
 
 ### CLI
+
+For bounded discovery and search, run `bun cli.ts --global "topic:testing language:TypeScript" "test runner"` (optionally add `--path src/`). The first query uses GitHub repository metadata search, not code search; the second is the semantic code query. `repotool_global` provides the same behavior over MCP. Discovery examines at most five candidates from one GitHub search page and searches their default branches sequentially using the existing Copilot index workflow, which may trigger indexing. It can include private repositories visible to the token. Results are not exhaustive or globally ranked; failures, incomplete discovery, and timeouts are reported as partial results. Discovery errors, including rate limits, fail the request; a possible rate limit during search stops further candidates. The overall search timeout also bounds indexing and all candidates. Metadata search requires a token with appropriate GitHub access as well as Copilot embeddings access.
 
 With Bun and the package dependencies installed, run `bun cli.ts --help` from the package directory. For example:
 

@@ -25,6 +25,7 @@ import {
   envMsOrCfgSeconds,
   readSearchConfig,
   POLL_DELAY,
+  globalSearch,
 } from "./index.ts"
 
 const DESCRIPTION = `Semantic code search across GitHub repositories using Copilot embeddings.
@@ -140,6 +141,27 @@ server.registerTool("repotool", {
     }
     const msg = err instanceof Error ? err.message : String(err)
     return { content: [{ type: "text", text: msg }], isError: true }
+  }
+})
+
+server.registerTool("repotool_global", {
+  description: "Discover up to five repositories by GitHub metadata and search their default branches semantically. Results are not exhaustive.",
+  inputSchema: z.object({
+    discovery: z.string().min(1).describe("GitHub repository metadata search query"),
+    query: z.string().min(1).describe("Semantic code search query"),
+    path: z.array(z.string()).optional().describe("Path prefixes"),
+  }),
+}, async (params, extra) => {
+  try {
+    const cfg = readSearchConfig()
+    const signal = AbortSignal.any([extra.signal, AbortSignal.timeout(envMsOrCfgSeconds("GITHUBREPO_SEARCH_TIMEOUT", cfg.searchTimeout, 120000))])
+    signal.throwIfAborted()
+    const token = await getToken()
+    signal.throwIfAborted()
+    if (!token) throw new Error("Not authenticated. Run `opencode auth login` or `gh auth login`.")
+    return { content: [{ type: "text", text: await globalSearch(params.discovery, params.query, token, signal, params.path) }] }
+  } catch (err) {
+    return { content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }], isError: true }
   }
 })
 
